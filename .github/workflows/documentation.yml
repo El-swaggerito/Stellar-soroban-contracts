@@ -1,16 +1,7 @@
 name: Documentation
 
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'stellar-insured-contracts/contracts/**'
-      - 'stellar-insured-contracts/docs/**'
-  pull_request:
-    branches: [ main ]
-    paths:
-      - 'stellar-insured-contracts/contracts/**'
-      - 'stellar-insured-contracts/docs/**'
+  workflow_dispatch:
 
 jobs:
   verify-docs:
