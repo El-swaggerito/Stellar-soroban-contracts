@@ -45,6 +45,13 @@ mod propchain_contracts {
         InsufficientApprovals,
         AlreadyApproved,
         NotAuthorizedToPause,
+        // Slash appeal errors
+        SlashAppealNotFound,
+        AppealWindowClosed,
+        AppealAlreadyFinalized,
+        GovernanceProposalMismatch,
+        NotArbitrator,
+        AppealNotUnderReview,
     }
 
     /// Property Registry contract
@@ -94,6 +101,17 @@ mod propchain_contracts {
         fee_manager: Option<AccountId>,
         /// Fractional properties info
         fractional: Mapping<u64, FractionalInfo>,
+        // --- Slash Appeal System ---
+        /// Slash appeal records
+        slash_appeals: Mapping<u64, SlashAppeal>,
+        /// Slash appeal counter
+        slash_appeal_count: u64,
+        /// How long (in ms) after a slash the target may submit an appeal
+        appeal_window_duration: u64,
+        /// Accounts authorized as arbitrators for slash appeals
+        arbitrators: Mapping<AccountId, bool>,
+        /// Governance proposal outcomes: proposal_id -> approved (true = overturn slash)
+        governance_proposals: Mapping<u64, bool>,
     }
 
     /// Escrow information
@@ -307,6 +325,85 @@ mod propchain_contracts {
         Pending,
         Approved,
         Rejected,
+    }
+
+    // =========================================================================
+    // SLASH APPEAL TYPES
+    // =========================================================================
+
+    /// Roles that can be subject to a slash and therefore eligible to appeal
+    #[derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        scale::Encode,
+        scale::Decode,
+        ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub enum SlashableRole {
+        OracleProvider,
+        ClaimSubmitter,
+        GovernanceParticipant,
+        RiskPoolProvider,
+        Validator,
+    }
+
+    /// Lifecycle status of a slash appeal
+    #[derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        scale::Encode,
+        scale::Decode,
+        ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub enum SlashAppealStatus {
+        /// Submitted, awaiting arbitrator review
+        Pending,
+        /// Reviewed by arbitrator; awaiting governance vote to finalize
+        UnderReview,
+        /// Governance vote confirmed the slash — appeal denied
+        Upheld,
+        /// Governance vote overturned the slash — appeal granted
+        Overturned,
+    }
+
+    /// A slash appeal record
+    #[derive(
+        Debug, Clone, PartialEq, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct SlashAppeal {
+        pub id: u64,
+        /// The slashed account filing the appeal
+        pub target: AccountId,
+        /// Role under which the slash was applied
+        pub role: SlashableRole,
+        /// Human-readable reason for the appeal
+        pub reason: String,
+        /// Off-chain evidence reference (IPFS CID, URL, etc.)
+        pub evidence_ref: String,
+        /// Block timestamp when the appeal was submitted
+        pub submitted_at: u64,
+        /// Deadline (timestamp) by which the appeal must be reviewed
+        pub appeal_deadline: u64,
+        pub status: SlashAppealStatus,
+        /// Arbitrator who performed the initial review
+        pub reviewed_by: Option<AccountId>,
+        /// Timestamp of the arbitrator review
+        pub reviewed_at: Option<u64>,
+        /// Arbitrator's preliminary decision (true = recommend overturn)
+        pub arbitrator_decision: Option<bool>,
+        /// Governance proposal ID that finalizes this appeal (set during review)
+        pub governance_proposal_id: Option<u64>,
+        /// Timestamp when the appeal was finalized
+        pub finalized_at: Option<u64>,
     }
 
     /// Pause information
@@ -747,6 +844,50 @@ mod propchain_contracts {
         updated_by: AccountId,
     }
 
+    // =========================================================================
+    // SLASH APPEAL EVENTS
+    // =========================================================================
+
+    /// Emitted when a slash appeal is submitted
+    #[ink(event)]
+    pub struct SlashAppealSubmitted {
+        #[ink(topic)]
+        appeal_id: u64,
+        #[ink(topic)]
+        target: AccountId,
+        #[ink(topic)]
+        role: SlashableRole,
+        evidence_ref: String,
+        submitted_at: u64,
+        appeal_deadline: u64,
+    }
+
+    /// Emitted when an arbitrator reviews a slash appeal
+    #[ink(event)]
+    pub struct SlashAppealReviewed {
+        #[ink(topic)]
+        appeal_id: u64,
+        #[ink(topic)]
+        reviewed_by: AccountId,
+        /// true = arbitrator recommends overturning the slash
+        arbitrator_decision: bool,
+        governance_proposal_id: u64,
+        reviewed_at: u64,
+    }
+
+    /// Emitted when a slash appeal is finalized after governance vote
+    #[ink(event)]
+    pub struct SlashAppealFinalized {
+        #[ink(topic)]
+        appeal_id: u64,
+        #[ink(topic)]
+        target: AccountId,
+        /// true = slash overturned (appeal granted), false = slash upheld
+        overturned: bool,
+        governance_proposal_id: u64,
+        finalized_at: u64,
+    }
+
     impl PropertyRegistry {
         /// Creates a new PropertyRegistry contract
         #[ink(constructor)]
@@ -794,6 +935,12 @@ mod propchain_contracts {
                 oracle: None,
                 fee_manager: None,
                 fractional: Mapping::default(),
+                slash_appeals: Mapping::default(),
+                slash_appeal_count: 0,
+                // Default appeal window: 7 days in milliseconds
+                appeal_window_duration: 7 * 24 * 60 * 60 * 1_000,
+                arbitrators: Mapping::default(),
+                governance_proposals: Mapping::default(),
             };
 
             // Emit contract initialization event
@@ -2482,6 +2629,252 @@ mod propchain_contracts {
         #[ink(message)]
         pub fn get_appeal(&self, appeal_id: u64) -> Option<Appeal> {
             self.appeals.get(appeal_id)
+        }
+
+        // =====================================================================
+        // SLASH APPEAL SYSTEM
+        // =====================================================================
+
+        /// Configure the appeal window duration (admin only).
+        /// `duration_ms` is the number of milliseconds after a slash event during
+        /// which the target may submit an appeal.
+        #[ink(message)]
+        pub fn set_appeal_window_duration(&mut self, duration_ms: u64) -> Result<(), Error> {
+            if self.env().caller() != self.admin {
+                return Err(Error::Unauthorized);
+            }
+            self.appeal_window_duration = duration_ms;
+            Ok(())
+        }
+
+        /// Authorize or deauthorize an arbitrator (admin or multisig governance only).
+        #[ink(message)]
+        pub fn set_arbitrator(&mut self, account: AccountId, authorized: bool) -> Result<(), Error> {
+            if self.env().caller() != self.admin {
+                return Err(Error::Unauthorized);
+            }
+            self.arbitrators.insert(account, &authorized);
+            Ok(())
+        }
+
+        /// Record the outcome of a governance proposal so `finalize_appeal` can
+        /// verify alignment.  Callable by admin or an authorized arbitrator.
+        #[ink(message)]
+        pub fn record_governance_proposal(
+            &mut self,
+            proposal_id: u64,
+            approved: bool,
+        ) -> Result<(), Error> {
+            let caller = self.env().caller();
+            if caller != self.admin && !self.arbitrators.get(caller).unwrap_or(false) {
+                return Err(Error::Unauthorized);
+            }
+            self.governance_proposals.insert(proposal_id, &approved);
+            Ok(())
+        }
+
+        /// Submit a slash appeal.
+        ///
+        /// The caller must be the slashed `target`.  The appeal is only accepted
+        /// within the configured `appeal_window_duration` from `slash_timestamp`
+        /// (the on-chain time the slash was applied, supplied by the caller and
+        /// validated against the window).
+        #[ink(message)]
+        pub fn submit_slash_appeal(
+            &mut self,
+            target: AccountId,
+            role: SlashableRole,
+            reason: String,
+            evidence_ref: String,
+            // Timestamp (ms) when the slash was applied — used to enforce the appeal window.
+            slash_timestamp: u64,
+        ) -> Result<u64, Error> {
+            self.ensure_not_paused()?;
+            let caller = self.env().caller();
+
+            // Only the slashed account may file its own appeal
+            if caller != target {
+                return Err(Error::Unauthorized);
+            }
+
+            let now = self.env().block_timestamp();
+
+            // Enforce appeal window: appeal must be submitted within the allowed period
+            let window_end = slash_timestamp.saturating_add(self.appeal_window_duration);
+            if now > window_end {
+                return Err(Error::AppealWindowClosed);
+            }
+
+            self.slash_appeal_count += 1;
+            let appeal_id = self.slash_appeal_count;
+
+            let appeal = SlashAppeal {
+                id: appeal_id,
+                target,
+                role,
+                reason,
+                evidence_ref: evidence_ref.clone(),
+                submitted_at: now,
+                appeal_deadline: window_end,
+                status: SlashAppealStatus::Pending,
+                reviewed_by: None,
+                reviewed_at: None,
+                arbitrator_decision: None,
+                governance_proposal_id: None,
+                finalized_at: None,
+            };
+
+            self.slash_appeals.insert(appeal_id, &appeal);
+
+            self.env().emit_event(SlashAppealSubmitted {
+                appeal_id,
+                target,
+                role,
+                evidence_ref,
+                submitted_at: now,
+                appeal_deadline: window_end,
+            });
+
+            Ok(appeal_id)
+        }
+
+        /// Review a slash appeal.
+        ///
+        /// Callable by an authorized arbitrator or the multisig admin.  Sets the
+        /// appeal to `UnderReview`, records the arbitrator's preliminary decision,
+        /// and links the governance proposal that will cast the final vote.
+        #[ink(message)]
+        pub fn review_appeal(
+            &mut self,
+            appeal_id: u64,
+            // Arbitrator's recommendation: true = overturn slash, false = uphold slash
+            decision: bool,
+            // ID of the governance proposal that will finalize this appeal
+            governance_proposal_id: u64,
+        ) -> Result<(), Error> {
+            self.ensure_not_paused()?;
+            let caller = self.env().caller();
+
+            // Must be admin or an authorized arbitrator
+            if caller != self.admin && !self.arbitrators.get(caller).unwrap_or(false) {
+                return Err(Error::NotArbitrator);
+            }
+
+            let mut appeal = self
+                .slash_appeals
+                .get(appeal_id)
+                .ok_or(Error::SlashAppealNotFound)?;
+
+            // Can only review a pending appeal
+            if appeal.status != SlashAppealStatus::Pending {
+                return Err(Error::InvalidAppealStatus);
+            }
+
+            // Enforce appeal window — review must happen before the deadline
+            let now = self.env().block_timestamp();
+            if now > appeal.appeal_deadline {
+                return Err(Error::AppealWindowClosed);
+            }
+
+            appeal.status = SlashAppealStatus::UnderReview;
+            appeal.reviewed_by = Some(caller);
+            appeal.reviewed_at = Some(now);
+            appeal.arbitrator_decision = Some(decision);
+            appeal.governance_proposal_id = Some(governance_proposal_id);
+
+            self.slash_appeals.insert(appeal_id, &appeal);
+
+            self.env().emit_event(SlashAppealReviewed {
+                appeal_id,
+                reviewed_by: caller,
+                arbitrator_decision: decision,
+                governance_proposal_id,
+                reviewed_at: now,
+            });
+
+            Ok(())
+        }
+
+        /// Finalize a slash appeal after the governance vote has been recorded.
+        ///
+        /// Callable by an authorized arbitrator or the admin.  The final status
+        /// **must align** with the linked governance proposal outcome; if the
+        /// proposal result contradicts the requested finalization the call reverts.
+        #[ink(message)]
+        pub fn finalize_appeal(&mut self, appeal_id: u64) -> Result<(), Error> {
+            self.ensure_not_paused()?;
+            let caller = self.env().caller();
+
+            // Must be admin or an authorized arbitrator
+            if caller != self.admin && !self.arbitrators.get(caller).unwrap_or(false) {
+                return Err(Error::NotArbitrator);
+            }
+
+            let mut appeal = self
+                .slash_appeals
+                .get(appeal_id)
+                .ok_or(Error::SlashAppealNotFound)?;
+
+            // Must be in UnderReview state
+            if appeal.status != SlashAppealStatus::UnderReview {
+                return Err(Error::AppealNotUnderReview);
+            }
+
+            // Prevent double-finalization
+            if appeal.finalized_at.is_some() {
+                return Err(Error::AppealAlreadyFinalized);
+            }
+
+            // Retrieve the linked governance proposal outcome
+            let proposal_id = appeal
+                .governance_proposal_id
+                .ok_or(Error::GovernanceProposalMismatch)?;
+
+            let governance_approved = self
+                .governance_proposals
+                .get(proposal_id)
+                .ok_or(Error::GovernanceProposalMismatch)?;
+
+            // Final status is driven entirely by the governance vote
+            let overturned = governance_approved;
+            appeal.status = if overturned {
+                SlashAppealStatus::Overturned
+            } else {
+                SlashAppealStatus::Upheld
+            };
+
+            let now = self.env().block_timestamp();
+            appeal.finalized_at = Some(now);
+
+            self.slash_appeals.insert(appeal_id, &appeal);
+
+            self.env().emit_event(SlashAppealFinalized {
+                appeal_id,
+                target: appeal.target,
+                overturned,
+                governance_proposal_id: proposal_id,
+                finalized_at: now,
+            });
+
+            Ok(())
+        }
+
+        /// Query a slash appeal by ID.
+        #[ink(message)]
+        pub fn get_slash_appeal(&self, appeal_id: u64) -> Option<SlashAppeal> {
+            self.slash_appeals.get(appeal_id)
+        }
+
+        /// Check whether an account is an authorized arbitrator.
+        #[ink(message)]
+        pub fn is_arbitrator(&self, account: AccountId) -> bool {
+            self.arbitrators.get(account).unwrap_or(false)
+        }
+
+        /// Returns the current appeal window duration in milliseconds.
+        #[ink(message)]
+        pub fn get_appeal_window_duration(&self) -> u64 {
+            self.appeal_window_duration
         }
     }
 
