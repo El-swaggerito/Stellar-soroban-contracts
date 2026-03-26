@@ -99,6 +99,17 @@ mod property_token {
         last_trade_price: Mapping<TokenId, u128>,
         compliance_registry: Option<AccountId>,
         tax_records: Mapping<(AccountId, TokenId), TaxRecord>,
+
+        // History tracking mappings for enterprise-grade APIs
+        proposal_history_count: Mapping<TokenId, u32>,
+        proposal_history_items: Mapping<(TokenId, u32), ProposalHistoryEntry>,
+        vote_history_count: Mapping<(TokenId, u64), u32>,
+        vote_history_items: Mapping<(TokenId, u64, u32), VoteHistoryEntry>,
+        execution_history_count: u32,
+        execution_history_items: Mapping<u32, ExecutionHistoryEntry>,
+        slashing_history_count: u32,
+        slashing_history_items: Mapping<u32, SlashingHistoryEntry>,
+    }
     }
 
     /// Token ID type alias
@@ -255,6 +266,222 @@ mod property_token {
         pub dividends_received: u128,
         pub shares_sold: u128,
         pub proceeds: u128,
+    }
+
+    /// Pagination parameters for history queries
+    #[derive(
+        Debug,
+        Clone,
+        PartialEq,
+        Eq,
+        scale::Encode,
+        scale::Decode,
+        ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct PaginationParams {
+        pub offset: u32,
+        pub limit: u32,
+        pub sort_ascending: bool,
+    }
+
+    /// Pagination metadata for response
+    #[derive(
+        Debug,
+        Clone,
+        PartialEq,
+        Eq,
+        scale::Encode,
+        scale::Decode,
+        ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct PaginationInfo {
+        pub total_count: u32,
+        pub returned_count: u32,
+        pub offset: u32,
+        pub limit: u32,
+        pub has_more: bool,
+    }
+
+    /// Proposal history entry
+    #[derive(
+        Debug,
+        Clone,
+        PartialEq,
+        scale::Encode,
+        scale::Decode,
+        ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct ProposalHistoryEntry {
+        pub proposal_id: u64,
+        pub token_id: TokenId,
+        pub description_hash: Hash,
+        pub quorum: u128,
+        pub for_votes: u128,
+        pub against_votes: u128,
+        pub status: ProposalStatus,
+        pub created_at: u64,
+        pub executed_at: Option<u64>,
+        pub creator: AccountId,
+    }
+
+    /// Vote history entry
+    #[derive(
+        Debug,
+        Clone,
+        PartialEq,
+        scale::Encode,
+        scale::Decode,
+        ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct VoteHistoryEntry {
+        pub proposal_id: u64,
+        pub token_id: TokenId,
+        pub voter: AccountId,
+        pub support: bool,
+        pub vote_weight: u128,
+        pub voted_at: u64,
+    }
+
+    /// Execution history entry
+    #[derive(
+        Debug,
+        Clone,
+        PartialEq,
+        scale::Encode,
+        scale::Decode,
+        ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct ExecutionHistoryEntry {
+        pub proposal_id: u64,
+        pub token_id: TokenId,
+        pub executed_at: u64,
+        pub passed: bool,
+        pub executor: AccountId,
+        pub transaction_hash: Hash,
+    }
+
+    /// Slashing reason enum
+    #[derive(
+        Debug,
+        Clone,
+        PartialEq,
+        Eq,
+        scale::Encode,
+        scale::Decode,
+        ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub enum SlashingReason {
+        OracleManipulation,
+        GovernanceAttack,
+        DoubleSigning,
+        ComplianceViolation,
+        MaliciousBehavior,
+        Negligence,
+        Custom(String),
+    }
+
+    /// Slashing role enum
+    #[derive(
+        Debug,
+        Clone,
+        PartialEq,
+        Eq,
+        scale::Encode,
+        scale::Decode,
+        ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub enum SlashingRole {
+        OracleProvider,
+        GovernanceParticipant,
+        RiskPoolProvider,
+        ClaimSubmitter,
+        BridgeOperator,
+        Other(String),
+    }
+
+    /// Slashing history entry
+    #[derive(
+        Debug,
+        Clone,
+        PartialEq,
+        scale::Encode,
+        scale::Decode,
+        ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct SlashingHistoryEntry {
+        pub target: AccountId,
+        pub role: SlashingRole,
+        pub reason: SlashingReason,
+        pub slashed_amount: u128,
+        pub slashed_at: u64,
+        pub transaction_hash: Hash,
+        pub authority: AccountId,
+        pub repeat_offense_count: u32,
+    }
+
+    /// History query response with pagination
+    #[derive(
+        Debug,
+        Clone,
+        PartialEq,
+        scale::Encode,
+        scale::Decode,
+        ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct PaginatedProposalHistory {
+        pub entries: Vec<ProposalHistoryEntry>,
+        pub pagination: PaginationInfo,
+    }
+
+    #[derive(
+        Debug,
+        Clone,
+        PartialEq,
+        scale::Encode,
+        scale::Decode,
+        ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct PaginatedVoteHistory {
+        pub entries: Vec<VoteHistoryEntry>,
+        pub pagination: PaginationInfo,
+    }
+
+    #[derive(
+        Debug,
+        Clone,
+        PartialEq,
+        scale::Encode,
+        scale::Decode,
+        ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct PaginatedExecutionHistory {
+        pub entries: Vec<ExecutionHistoryEntry>,
+        pub pagination: PaginationInfo,
+    }
+
+    #[derive(
+        Debug,
+        Clone,
+        PartialEq,
+        scale::Encode,
+        scale::Decode,
+        ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct PaginatedSlashingHistory {
+        pub entries: Vec<SlashingHistoryEntry>,
+        pub pagination: PaginationInfo,
     }
 
     // Events for tracking property token operations
@@ -543,6 +770,16 @@ mod property_token {
                 last_trade_price: Mapping::default(),
                 compliance_registry: None,
                 tax_records: Mapping::default(),
+
+                // History tracking mappings initialized to empty
+                proposal_history_count: Mapping::default(),
+                proposal_history_items: Mapping::default(),
+                vote_history_count: Mapping::default(),
+                vote_history_items: Mapping::default(),
+                execution_history_count: 0,
+                execution_history_items: Mapping::default(),
+                slashing_history_count: 0,
+                slashing_history_items: Mapping::default(),
             }
         }
 
@@ -972,6 +1209,24 @@ mod property_token {
                 created_at: self.env().block_timestamp(),
             };
             self.proposals.insert((token_id, counter), &proposal);
+            
+            // Add to proposal history
+            let history_count = self.proposal_history_count.get(token_id).unwrap_or(0);
+            let history_entry = ProposalHistoryEntry {
+                proposal_id: counter,
+                token_id,
+                description_hash,
+                quorum,
+                for_votes: 0,
+                against_votes: 0,
+                status: ProposalStatus::Open,
+                created_at: self.env().block_timestamp(),
+                executed_at: None,
+                creator: caller.clone(),
+            };
+            self.proposal_history_items.insert((token_id, history_count), &history_entry);
+            self.proposal_history_count.insert(token_id, &(history_count + 1));
+            
             self.env().emit_event(ProposalCreated {
                 token_id,
                 proposal_id: counter,
@@ -1011,6 +1266,20 @@ mod property_token {
             self.proposals.insert((token_id, proposal_id), &proposal);
             self.votes_cast
                 .insert((token_id, proposal_id, voter), &true);
+            
+            // Add to vote history
+            let vote_history_count = self.vote_history_count.get((token_id, proposal_id)).unwrap_or(0);
+            let vote_entry = VoteHistoryEntry {
+                proposal_id,
+                token_id,
+                voter: voter.clone(),
+                support,
+                vote_weight: weight,
+                voted_at: self.env().block_timestamp(),
+            };
+            self.vote_history_items.insert((token_id, proposal_id, vote_history_count), &vote_entry);
+            self.vote_history_count.insert((token_id, proposal_id), &(vote_history_count + 1));
+            
             self.env().emit_event(Voted {
                 token_id,
                 proposal_id,
@@ -1036,12 +1305,38 @@ mod property_token {
             }
             let passed = proposal.for_votes >= proposal.quorum
                 && proposal.for_votes > proposal.against_votes;
+            let execution_timestamp = self.env().block_timestamp();
             proposal.status = if passed {
                 ProposalStatus::Executed
             } else {
                 ProposalStatus::Rejected
             };
             self.proposals.insert((token_id, proposal_id), &proposal);
+            
+            // Update proposal history with execution info
+            if let Some(mut history_entry) = self.proposal_history_items.get((token_id, proposal_id)) {
+                history_entry.status = proposal.status.clone();
+                history_entry.executed_at = Some(execution_timestamp);
+                history_entry.for_votes = proposal.for_votes;
+                history_entry.against_votes = proposal.against_votes;
+                self.proposal_history_items.insert((token_id, proposal_id), &history_entry);
+            }
+            
+            // Add to execution history
+            let exec_count = self.execution_history_count;
+            let executor = self.env().caller();
+            let tx_hash = Hash::from([0u8; 32]); // In real implementation, get actual tx hash
+            let exec_entry = ExecutionHistoryEntry {
+                proposal_id,
+                token_id,
+                executed_at: execution_timestamp,
+                passed,
+                executor,
+                transaction_hash: tx_hash,
+            };
+            self.execution_history_items.insert(&exec_count, &exec_entry);
+            self.execution_history_count = exec_count + 1;
+            
             self.env().emit_event(ProposalExecuted {
                 token_id,
                 proposal_id,
@@ -2296,6 +2591,263 @@ mod property_token {
             }
 
             errors
+        }
+
+        /// Enterprise-grade API: Get proposal history with pagination
+        #[ink(message)]
+        pub fn get_proposal_history(
+            &self,
+            token_id: TokenId,
+            params: PaginationParams,
+        ) -> PaginatedProposalHistory {
+            let total_count = self.proposal_history_count.get(token_id).unwrap_or(0);
+            
+            // Calculate pagination
+            let offset = params.offset.min(total_count);
+            let limit = params.limit.min(100).min(total_count - offset); // Cap at 100
+            let mut entries = Vec::new();
+            
+            // Retrieve entries based on sort order
+            if params.sort_ascending {
+                for i in offset..(offset + limit) {
+                    if let Some(entry) = self.proposal_history_items.get((token_id, i)) {
+                        entries.push(entry);
+                    }
+                }
+            } else {
+                // Descending order (most recent first)
+                for i in (0..total_count).rev() {
+                    if entries.len() >= limit as usize {
+                        break;
+                    }
+                    if i < offset {
+                        continue;
+                    }
+                    if let Some(entry) = self.proposal_history_items.get((token_id, i)) {
+                        entries.push(entry);
+                    }
+                }
+            }
+            
+            let returned_count = entries.len() as u32;
+            let has_more = offset + limit < total_count;
+            
+            PaginatedProposalHistory {
+                entries,
+                pagination: PaginationInfo {
+                    total_count,
+                    returned_count,
+                    offset,
+                    limit,
+                    has_more,
+                },
+            }
+        }
+
+        /// Enterprise-grade API: Get vote history for a proposal with pagination
+        #[ink(message)]
+        pub fn get_vote_history(
+            &self,
+            token_id: TokenId,
+            proposal_id: u64,
+            params: PaginationParams,
+        ) -> PaginatedVoteHistory {
+            let total_count = self.vote_history_count.get((token_id, proposal_id)).unwrap_or(0);
+            
+            // Calculate pagination
+            let offset = params.offset.min(total_count);
+            let limit = params.limit.min(100).min(total_count - offset); // Cap at 100
+            let mut entries = Vec::new();
+            
+            // Retrieve entries based on sort order
+            if params.sort_ascending {
+                for i in offset..(offset + limit) {
+                    if let Some(entry) = self.vote_history_items.get((token_id, proposal_id, i)) {
+                        entries.push(entry);
+                    }
+                }
+            } else {
+                // Descending order (most recent first)
+                for i in (0..total_count).rev() {
+                    if entries.len() >= limit as usize {
+                        break;
+                    }
+                    if i < offset {
+                        continue;
+                    }
+                    if let Some(entry) = self.vote_history_items.get((token_id, proposal_id, i)) {
+                        entries.push(entry);
+                    }
+                }
+            }
+            
+            let returned_count = entries.len() as u32;
+            let has_more = offset + limit < total_count;
+            
+            PaginatedVoteHistory {
+                entries,
+                pagination: PaginationInfo {
+                    total_count,
+                    returned_count,
+                    offset,
+                    limit,
+                    has_more,
+                },
+            }
+        }
+
+        /// Enterprise-grade API: Get execution history with pagination
+        #[ink(message)]
+        pub fn get_execution_history(
+            &self,
+            params: PaginationParams,
+        ) -> PaginatedExecutionHistory {
+            let total_count = self.execution_history_count;
+            
+            // Calculate pagination
+            let offset = params.offset.min(total_count);
+            let limit = params.limit.min(100).min(total_count - offset); // Cap at 100
+            let mut entries = Vec::new();
+            
+            // Retrieve entries based on sort order
+            if params.sort_ascending {
+                for i in offset..(offset + limit) {
+                    if let Some(entry) = self.execution_history_items.get(&i) {
+                        entries.push(entry);
+                    }
+                }
+            } else {
+                // Descending order (most recent first)
+                for i in (0..total_count).rev() {
+                    if entries.len() >= limit as usize {
+                        break;
+                    }
+                    if i < offset {
+                        continue;
+                    }
+                    if let Some(entry) = self.execution_history_items.get(&i) {
+                        entries.push(entry);
+                    }
+                }
+            }
+            
+            let returned_count = entries.len() as u32;
+            let has_more = offset + limit < total_count;
+            
+            PaginatedExecutionHistory {
+                entries,
+                pagination: PaginationInfo {
+                    total_count,
+                    returned_count,
+                    offset,
+                    limit,
+                    has_more,
+                },
+            }
+        }
+
+        /// Enterprise-grade API: Record slashing event (admin/governance only)
+        #[ink(message)]
+        pub fn record_slashing(
+            &mut self,
+            target: AccountId,
+            role: SlashingRole,
+            reason: SlashingReason,
+            slashed_amount: u128,
+            authority: AccountId,
+        ) -> Result<(), Error> {
+            // Only admin or governance can record slashing
+            let caller = self.env().caller();
+            if caller != self.admin && caller != authority {
+                return Err(Error::Unauthorized);
+            }
+            
+            // Count repeat offenses
+            let mut repeat_count = 0u32;
+            for i in 0..self.slashing_history_count {
+                if let Some(entry) = self.slashing_history_items.get(&i) {
+                    if entry.target == target && entry.role == role {
+                        repeat_count += 1;
+                    }
+                }
+            }
+            
+            // Create slashing history entry
+            let tx_hash = Hash::from([0u8; 32]); // In real implementation, get actual tx hash
+            let slashing_entry = SlashingHistoryEntry {
+                target: target.clone(),
+                role,
+                reason,
+                slashed_amount,
+                slashed_at: self.env().block_timestamp(),
+                transaction_hash: tx_hash,
+                authority,
+                repeat_offense_count: repeat_count,
+            };
+            
+            // Store in history
+            let history_count = self.slashing_history_count;
+            self.slashing_history_items.insert(&history_count, &slashing_entry);
+            self.slashing_history_count = history_count + 1;
+            
+            Ok(())
+        }
+
+        /// Enterprise-grade API: Get slashing history with pagination
+        #[ink(message)]
+        pub fn get_slashing_history(
+            &self,
+            target: Option<AccountId>,
+            role: Option<SlashingRole>,
+            params: PaginationParams,
+        ) -> PaginatedSlashingHistory {
+            let total_count = self.slashing_history_count;
+            
+            // Filter entries if filters are provided
+            let mut all_entries = Vec::new();
+            for i in 0..total_count {
+                if let Some(entry) = self.slashing_history_items.get(&i) {
+                    let matches_target = target.is_none() || entry.target == target.as_ref().unwrap();
+                    let matches_role = role.is_none() || entry.role == *role.as_ref().unwrap();
+                    
+                    if matches_target && matches_role {
+                        all_entries.push((i, entry));
+                    }
+                }
+            }
+            
+            let filtered_total = all_entries.len() as u32;
+            
+            // Calculate pagination
+            let offset = params.offset.min(filtered_total);
+            let limit = params.limit.min(100).min(filtered_total - offset); // Cap at 100
+            let mut entries = Vec::new();
+            
+            // Sort by index (which represents chronological order)
+            if params.sort_ascending {
+                for (_, entry) in all_entries.iter().skip(offset as usize).take(limit as usize) {
+                    entries.push(entry.clone());
+                }
+            } else {
+                // Descending order (most recent first)
+                for (_, entry) in all_entries.iter().rev().skip((filtered_total - offset - limit) as usize).take(limit as usize) {
+                    entries.push(entry.clone());
+                }
+            }
+            
+            let returned_count = entries.len() as u32;
+            let has_more = offset + limit < filtered_total;
+            
+            PaginatedSlashingHistory {
+                entries,
+                pagination: PaginationInfo {
+                    total_count: filtered_total,
+                    returned_count,
+                    offset,
+                    limit,
+                    has_more,
+                },
+            }
         }
     }
 

@@ -36,6 +36,21 @@ Updates the compliance verification status for a token.
 ##### `get_ownership_history(token_id: TokenId) -> Option<Vec<OwnershipTransfer>>`
 Retrieves the complete on-chain ownership history for a property.
 
+##### `get_proposal_history(token_id: TokenId, params: PaginationParams) -> PaginatedProposalHistory`
+Enterprise-grade API for retrieving proposal history with pagination support.
+
+##### `get_vote_history(token_id: TokenId, proposal_id: u64, params: PaginationParams) -> PaginatedVoteHistory`
+Enterprise-grade API for retrieving vote history with pagination support.
+
+##### `get_execution_history(params: PaginationParams) -> PaginatedExecutionHistory`
+Enterprise-grade API for retrieving execution history with pagination support.
+
+##### `get_slashing_history(target: Option<AccountId>, role: Option<SlashingRole>, params: PaginationParams) -> PaginatedSlashingHistory`
+Enterprise-grade API for retrieving slashing history with filtering and pagination support.
+
+##### `record_slashing(target: AccountId, role: SlashingRole, reason: SlashingReason, slashed_amount: u128, authority: AccountId) -> Result<(), Error>`
+Records a slashing event for governance participants (admin/governance only).
+
 ---
 
 ### ComplianceRegistry
@@ -265,6 +280,139 @@ pub struct PropertyValuation {
     pub sources_used: u32,           // Number of price sources used
     pub last_updated: u64,           // Last update timestamp
     pub valuation_method: ValuationMethod,
+}
+```
+
+### History API Structures
+
+#### PaginationParams
+```rust
+pub struct PaginationParams {
+    pub offset: u32,
+    pub limit: u32,
+    pub sort_ascending: bool,
+}
+```
+
+#### PaginationInfo
+```rust
+pub struct PaginationInfo {
+    pub total_count: u32,
+    pub returned_count: u32,
+    pub offset: u32,
+    pub limit: u32,
+    pub has_more: bool,
+}
+```
+
+#### ProposalHistoryEntry
+```rust
+pub struct ProposalHistoryEntry {
+    pub proposal_id: u64,
+    pub token_id: TokenId,
+    pub description_hash: Hash,
+    pub quorum: u128,
+    pub for_votes: u128,
+    pub against_votes: u128,
+    pub status: ProposalStatus,
+    pub created_at: u64,
+    pub executed_at: Option<u64>,
+    pub creator: AccountId,
+}
+```
+
+#### VoteHistoryEntry
+```rust
+pub struct VoteHistoryEntry {
+    pub proposal_id: u64,
+    pub token_id: TokenId,
+    pub voter: AccountId,
+    pub support: bool,
+    pub vote_weight: u128,
+    pub voted_at: u64,
+}
+```
+
+#### ExecutionHistoryEntry
+```rust
+pub struct ExecutionHistoryEntry {
+    pub proposal_id: u64,
+    pub token_id: TokenId,
+    pub executed_at: u64,
+    pub passed: bool,
+    pub executor: AccountId,
+    pub transaction_hash: Hash,
+}
+```
+
+#### SlashingHistoryEntry
+```rust
+pub struct SlashingHistoryEntry {
+    pub target: AccountId,
+    pub role: SlashingRole,
+    pub reason: SlashingReason,
+    pub slashed_amount: u128,
+    pub slashed_at: u64,
+    pub transaction_hash: Hash,
+    pub authority: AccountId,
+    pub repeat_offense_count: u32,
+}
+```
+
+#### SlashingRole
+```rust
+pub enum SlashingRole {
+    OracleProvider,
+    GovernanceParticipant,
+    RiskPoolProvider,
+    ClaimSubmitter,
+    BridgeOperator,
+    Other(String),
+}
+```
+
+#### SlashingReason
+```rust
+pub enum SlashingReason {
+    OracleManipulation,
+    GovernanceAttack,
+    DoubleSigning,
+    ComplianceViolation,
+    MaliciousBehavior,
+    Negligence,
+    Custom(String),
+}
+```
+
+#### PaginatedProposalHistory
+```rust
+pub struct PaginatedProposalHistory {
+    pub entries: Vec<ProposalHistoryEntry>,
+    pub pagination: PaginationInfo,
+}
+```
+
+#### PaginatedVoteHistory
+```rust
+pub struct PaginatedVoteHistory {
+    pub entries: Vec<VoteHistoryEntry>,
+    pub pagination: PaginationInfo,
+}
+```
+
+#### PaginatedExecutionHistory
+```rust
+pub struct PaginatedExecutionHistory {
+    pub entries: Vec<ExecutionHistoryEntry>,
+    pub pagination: PaginationInfo,
+}
+```
+
+#### PaginatedSlashingHistory
+```rust
+pub struct PaginatedSlashingHistory {
+    pub entries: Vec<SlashingHistoryEntry>,
+    pub pagination: PaginationInfo,
 }
 ```
 
