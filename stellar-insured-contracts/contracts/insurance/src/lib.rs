@@ -163,6 +163,43 @@ mod propchain_insurance {
         pub description: Option<String>,
     }
 
+    /// Enhanced evidence item with verification tracking
+    #[derive(
+        Debug, Clone, PartialEq, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct EvidenceItem {
+        pub id: u64,
+        pub claim_id: u64,
+        pub evidence_type: String,           // photo, document, video, sensor_data, etc.
+        pub ipfs_hash: String,               // IPFS CID (e.g., "QmX...")
+        pub ipfs_uri: String,                // Full IPFS URI (ipfs://QmX...)
+        pub content_hash: Vec<u8>,           // SHA-256 hash of content (32 bytes)
+        pub file_size: u64,                  // Size in bytes (for cost calculation)
+        pub submitter: AccountId,            // Who submitted this evidence
+        pub submitted_at: u64,               // Timestamp of submission
+        pub verified: bool,                  // Whether evidence has been verified
+        pub verified_by: Option<AccountId>,  // Who verified it
+        pub verified_at: Option<u64>,        // When it was verified
+        pub verification_notes: Option<String>, // Optional notes from verifier
+        pub metadata_url: Option<String>,    // Additional metadata (JSON on IPFS)
+    }
+
+    /// Evidence verification record for audit trail
+    #[derive(
+        Debug, Clone, PartialEq, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct EvidenceVerification {
+        pub evidence_id: u64,
+        pub verifier: AccountId,
+        pub verified_at: u64,
+        pub is_valid: bool,
+        pub notes: String,
+        ipfs_accessible: bool,           // Whether IPFS content was accessible
+        hash_matches: bool,              // Whether content hash matches
+    }
+
     #[derive(
         Debug, Clone, PartialEq, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
     )]
@@ -197,7 +234,8 @@ mod propchain_insurance {
         pub claimant: AccountId,
         pub claim_amount: u128,
         pub description: String,
-        pub evidence: EvidenceMetadata,
+        pub primary_evidence: EvidenceMetadata,  // Original single evidence (backward compat)
+        pub evidence_ids: Vec<u64>,              // IDs of all attached evidence items
         pub oracle_report_url: String,
         pub status: ClaimStatus,
         pub submitted_at: u64,
@@ -352,6 +390,12 @@ mod propchain_insurance {
         claim_count: u64,
         policy_claims: Mapping<u64, Vec<u64>>,
 
+        // Evidence Storage
+        evidence_items: Mapping<u64, EvidenceItem>,      // evidence_id -> EvidenceItem
+        claim_evidence: Mapping<u64, Vec<u64>>,          // claim_id -> Vec<evidence_ids>
+        evidence_verifications: Mapping<u64, Vec<EvidenceVerification>>, // evidence_id -> verifications
+        evidence_count: u64,
+
         // Risk Pools
         pools: Mapping<u64, RiskPool>,
         pool_count: u64,
@@ -395,6 +439,10 @@ mod propchain_insurance {
         platform_fee_rate: u32,     // Basis points (e.g. 200 = 2%)
         claim_cooldown_period: u64, // In seconds
         min_pool_capital: u128,
+
+        // Policy expiration tracking
+        active_policy_indexes: Vec<u64>, // Ordered list of active policy IDs
+        last_expiration_check_index: u64, // Index in active_policy_indexes for pagination
     }
 
     // =========================================================================
@@ -565,6 +613,47 @@ mod propchain_insurance {
         timestamp: u64,
     }
 
+    #[ink(event)]
+    pub struct EvidenceSubmitted {
+        #[ink(topic)]
+        evidence_id: u64,
+        #[ink(topic)]
+        claim_id: u64,
+        evidence_type: String,
+        ipfs_hash: String,
+        submitter: AccountId,
+        submitted_at: u64,
+    }
+
+    #[ink(event)]
+    pub struct EvidenceVerified {
+        #[ink(topic)]
+        evidence_id: u64,
+        #[ink(topic)]
+        verified_by: AccountId,
+        is_valid: bool,
+        verified_at: u64,
+    }
+
+    #[ink(event)]
+    pub struct PolicyExpired {
+        #[ink(topic)]
+        policy_id: u64,
+        #[ink(topic)]
+        policyholder: AccountId,
+        expired_at: u64,
+        end_time: u64,
+    }
+
+    #[ink(event)]
+    pub struct PoliciesExpirationChecked {
+        #[ink(topic)]
+        checked_count: u64,
+        expired_count: u64,
+        next_start_index: u64,
+        timestamp: u64,
+    }
+
     // =========================================================================
     // IMPLEMENTATION
     // =========================================================================
@@ -581,6 +670,10 @@ mod propchain_insurance {
                 claims: Mapping::default(),
                 claim_count: 0,
                 policy_claims: Mapping::default(),
+                evidence_items: Mapping::default(),
+                claim_evidence: Mapping::default(),
+                evidence_verifications: Mapping::default(),
+                evidence_count: 0,
                 pools: Mapping::default(),
                 pool_count: 0,
                 risk_assessments: Mapping::default(),
@@ -601,6 +694,8 @@ mod propchain_insurance {
                 claim_cooldown_period: 2_592_000,  // 30 days in seconds
                 min_pool_capital: 100_000_000_000, // Minimum pool capital
                 oracle_contract: None,
+                active_policy_indexes: Vec::new(),
+                last_expiration_check_index: 0,
             }
         }
 
@@ -1103,6 +1198,9 @@ mod propchain_insurance {
             prop_policies.push(policy_id);
             self.property_policies.insert(&property_id, &prop_policies);
 
+            // Add to active policy indexes for expiration tracking
+            self.active_policy_indexes.push(policy_id);
+
             // Mint insurance token
             self.internal_mint_token(policy_id, caller, coverage_amount)?;
 
@@ -1187,6 +1285,204 @@ mod propchain_insurance {
         }
 
         // =====================================================================
+        // AUTOMATED POLICY EXPIRATION CHECKER
+        // =====================================================================
+
+        /// Check and expire policies automatically. Callable by anyone.
+        /// Uses pagination to avoid gas limits - processes up to `batch_size` policies per call.
+        /// Returns the number of policies expired in this batch.
+        #[ink(message)]
+        pub fn check_and_expire_policies(
+            &mut self,
+            batch_size: u64,
+        ) -> Result<u64, InsuranceError> {
+            let now = self.env().block_timestamp();
+            let mut expired_count = 0u64;
+            let mut checked_count = 0u64;
+            let start_index = self.last_expiration_check_index;
+            let mut policies_to_remove = Vec::new();
+
+            // Process batch of policies starting from last checked index
+            for i in start_index..self.active_policy_indexes.len() {
+                if checked_count >= batch_size {
+                    break; // Gas limit protection
+                }
+
+                let policy_id = self.active_policy_indexes.get(i).unwrap_or(0);
+                if policy_id == 0 {
+                    continue; // Skip empty slots
+                }
+
+                if let Some(mut policy) = self.policies.get(&policy_id) {
+                    checked_count += 1;
+
+                    // Check if policy has expired
+                    if policy.status == PolicyStatus::Active && now > policy.end_time {
+                        // Mark as expired
+                        policy.status = PolicyStatus::Expired;
+                        self.policies.insert(&policy_id, &policy);
+
+                        // Emit expiration event
+                        self.env().emit_event(PolicyExpired {
+                            policy_id,
+                            policyholder: policy.policyholder,
+                            expired_at: now,
+                            end_time: policy.end_time,
+                        });
+
+                        expired_count += 1;
+
+                        // Mark for removal from active indexes
+                        policies_to_remove.push(i);
+                    }
+                }
+            }
+
+            // Remove expired policies from active indexes (in reverse order to maintain indices)
+            for &index in policies_to_remove.iter().rev() {
+                self.active_policy_indexes.remove(index);
+            }
+
+            // Update last checked index for pagination
+            let next_start_index = if checked_count < batch_size {
+                0 // Reset if we processed all remaining policies
+            } else {
+                start_index + checked_count
+            };
+            self.last_expiration_check_index = next_start_index;
+
+            // Emit summary event
+            self.env().emit_event(PoliciesExpirationChecked {
+                checked_count,
+                expired_count,
+                next_start_index,
+                timestamp: now,
+            });
+
+            Ok(expired_count)
+        }
+
+        /// Get all active policy IDs with pagination support
+        #[ink(message)]
+        pub fn get_active_policies(
+            &self,
+            start_index: u64,
+            limit: u64,
+        ) -> Vec<u64> {
+            let mut result = Vec::new();
+            let end_index = start_index.saturating_add(limit);
+
+            for i in start_index..end_index.min(self.active_policy_indexes.len()) {
+                let policy_id = self.active_policy_indexes.get(i).unwrap_or(0);
+                if policy_id != 0 {
+                    if let Some(policy) = self.policies.get(&policy_id) {
+                        if policy.status == PolicyStatus::Active {
+                            result.push(policy_id);
+                        }
+                    }
+                }
+            }
+
+            result
+        }
+
+        /// Get count of active policies
+        #[ink(message)]
+        pub fn get_active_policies_count(&self) -> u64 {
+            self.active_policy_indexes.len() as u64
+        }
+
+        /// Get policies that will expire within the next `seconds_from_now` seconds
+        #[ink(message)]
+        pub fn get_expiring_soon_policies(
+            &self,
+            seconds_from_now: u64,
+            start_index: u64,
+            limit: u64,
+        ) -> Vec<u64> {
+            let now = self.env().block_timestamp();
+            let expiry_threshold = now.saturating_add(seconds_from_now);
+            let mut expiring_policies = Vec::new();
+            let end_index = start_index.saturating_add(limit);
+
+            for i in start_index..end_index.min(self.active_policy_indexes.len()) {
+                let policy_id = self.active_policy_indexes.get(i).unwrap_or(0);
+                if policy_id != 0 {
+                    if let Some(policy) = self.policies.get(&policy_id) {
+                        if policy.status == PolicyStatus::Active 
+                            && policy.end_time <= expiry_threshold 
+                            && policy.end_time > now {
+                            expiring_policies.push(policy_id);
+                        }
+                    }
+                }
+            }
+
+            expiring_policies
+        }
+
+        /// Get detailed information about a specific policy's expiration status
+        #[ink(message)]
+        pub fn get_policy_expiration_info(
+            &self,
+            policy_id: u64,
+        ) -> Option<(u64, u64, u64, bool)> {
+            // Returns (start_time, end_time, time_remaining, is_expired)
+            if let Some(policy) = self.policies.get(&policy_id) {
+                let now = self.env().block_timestamp();
+                let is_expired = policy.status == PolicyStatus::Expired || now > policy.end_time;
+                let time_remaining = if is_expired {
+                    0
+                } else {
+                    policy.end_time.saturating_sub(now)
+                };
+                Some((policy.start_time, policy.end_time, time_remaining, is_expired))
+            } else {
+                None
+            }
+        }
+
+        /// Manually expire a specific policy (admin only)
+        #[ink(message)]
+        pub fn manually_expire_policy(
+            &mut self,
+            policy_id: u64,
+        ) -> Result<(), InsuranceError> {
+            let caller = self.env().caller();
+            
+            if caller != self.admin {
+                return Err(InsuranceError::Unauthorized);
+            }
+
+            let mut policy = self
+                .policies
+                .get(&policy_id)
+                .ok_or(InsuranceError::PolicyNotFound)?;
+
+            if policy.status != PolicyStatus::Active {
+                return Err(InsuranceError::PolicyInactive);
+            }
+
+            let now = self.env().block_timestamp();
+            policy.status = PolicyStatus::Expired;
+            self.policies.insert(&policy_id, &policy);
+
+            // Remove from active indexes if present
+            if let Some(index) = self.active_policy_indexes.iter().position(|&id| id == policy_id) {
+                self.active_policy_indexes.remove(index);
+            }
+
+            self.env().emit_event(PolicyExpired {
+                policy_id,
+                policyholder: policy.policyholder,
+                expired_at: now,
+                end_time: policy.end_time,
+            });
+
+            Ok(())
+        }
+
+        // =====================================================================
         // CLAIMS PROCESSING
         // =====================================================================
 
@@ -1249,7 +1545,8 @@ mod propchain_insurance {
                 claimant: caller,
                 claim_amount,
                 description,
-                evidence,
+                primary_evidence: evidence.clone(),  // Store original evidence
+                evidence_ids: Vec::new(),            // Initialize empty, can add more later
                 oracle_report_url: String::new(),
                 status: ClaimStatus::Pending,
                 submitted_at: now,
@@ -1395,6 +1692,306 @@ mod propchain_insurance {
             }
 
             Ok(())
+        }
+
+        // =====================================================================
+        // CLAIMS EVIDENCE VERIFICATION SYSTEM
+        // =====================================================================
+
+        /// Submit additional evidence for a claim (callable by claimant, assessor, or admin)
+        #[ink(message)]
+        pub fn submit_evidence(
+            &mut self,
+            claim_id: u64,
+            evidence_type: String,
+            ipfs_hash: String,
+            content_hash: Vec<u8>,
+            file_size: u64,
+            metadata_url: Option<String>,
+            description: Option<String>,
+        ) -> Result<u64, InsuranceError> {
+            let caller = self.env().caller();
+            let now = self.env().block_timestamp();
+
+            // Validate evidence type
+            if evidence_type.is_empty() {
+                return Err(InsuranceError::EvidenceNonceEmpty);
+            }
+
+            // Validate IPFS hash format (should start with Qm or similar)
+            if !ipfs_hash.starts_with("Qm") && !ipfs_hash.starts_with("bafy") {
+                return Err(InsuranceError::InvalidParameters);
+            }
+
+            // Validate content hash length (SHA-256 = 32 bytes)
+            if content_hash.len() != 32 {
+                return Err(InsuranceError::EvidenceInvalidHashLength);
+            }
+
+            // Get claim and verify it exists
+            let mut claim = self
+                .claims
+                .get(&claim_id)
+                .ok_or(InsuranceError::ClaimNotFound)?;
+
+            // Verify caller is authorized (claimant, assessor, or admin)
+            let is_authorized = caller == claim.claimant 
+                || claim.assessor == Some(caller) 
+                || caller == self.admin;
+            
+            if !is_authorized {
+                return Err(InsuranceError::Unauthorized);
+            }
+
+            // Create evidence item
+            let evidence_id = self.evidence_count + 1;
+            self.evidence_count = evidence_id;
+
+            let ipfs_uri = format!("ipfs://{}", ipfs_hash);
+            let reference_uri = ipfs_uri.clone();
+
+            let evidence = EvidenceItem {
+                id: evidence_id,
+                claim_id,
+                evidence_type: evidence_type.clone(),
+                ipfs_hash: ipfs_hash.clone(),
+                ipfs_uri: ipfs_uri.clone(),
+                content_hash: content_hash.clone(),
+                file_size,
+                submitter: caller,
+                submitted_at: now,
+                verified: false,
+                verified_by: None,
+                verified_at: None,
+                verification_notes: None,
+                metadata_url,
+            };
+
+            // Store evidence
+            self.evidence_items.insert(&evidence_id, &evidence);
+
+            // Add to claim's evidence list
+            let mut evidence_list = self.claim_evidence.get(&claim_id).unwrap_or_default();
+            evidence_list.push(evidence_id);
+            self.claim_evidence.insert(&claim_id, &evidence_list);
+
+            // Update claim with evidence IDs (for backward compatibility)
+            claim.evidence_ids = evidence_list.clone();
+            self.claims.insert(&claim_id, &claim);
+
+            // Emit event
+            self.env().emit_event(EvidenceSubmitted {
+                evidence_id,
+                claim_id,
+                evidence_type,
+                ipfs_hash,
+                submitter: caller,
+                submitted_at: now,
+            });
+
+            Ok(evidence_id)
+        }
+
+        /// Verify evidence item (callable by authorized assessors or admin)
+        #[ink(message)]
+        pub fn verify_evidence(
+            &mut self,
+            evidence_id: u64,
+            is_valid: bool,
+            notes: String,
+        ) -> Result<(), InsuranceError> {
+            let caller = self.env().caller();
+            let now = self.env().block_timestamp();
+
+            // Verify caller is authorized (admin or authorized assessor)
+            let is_assessor = self.authorized_assessors.get(&caller).unwrap_or(false);
+            if caller != self.admin && !is_assessor {
+                return Err(InsuranceError::Unauthorized);
+            }
+
+            // Get evidence item
+            let mut evidence = self
+                .evidence_items
+                .get(&evidence_id)
+                .ok_or(InsuranceError::ClaimNotFound)?;
+
+            // Prevent duplicate verification by same verifier
+            let verifications = self.evidence_verifications.get(&evidence_id).unwrap_or_default();
+            for verification in &verifications {
+                if verification.verifier == caller {
+                    return Err(InsuranceError::DuplicateClaim); // Reusing error for duplicate verification
+                }
+            }
+
+            // Perform verification checks
+            let ipfs_accessible = self.verify_ipfs_accessibility(&evidence.ipfs_hash);
+            let hash_matches = self.verify_content_hash(&evidence.content_hash);
+
+            // Update evidence status if this is the first verification and it's valid
+            if is_valid && !evidence.verified {
+                evidence.verified = true;
+                evidence.verified_by = Some(caller);
+                evidence.verified_at = Some(now);
+                evidence.verification_notes = Some(notes.clone());
+                self.evidence_items.insert(&evidence_id, &evidence);
+            }
+
+            // Create verification record
+            let verification = EvidenceVerification {
+                evidence_id,
+                verifier: caller,
+                verified_at: now,
+                is_valid,
+                notes: notes.clone(),
+                ipfs_accessible,
+                hash_matches,
+            };
+
+            // Store verification
+            let mut verifications = self.evidence_verifications.get(&evidence_id).unwrap_or_default();
+            verifications.push(verification);
+            self.evidence_verifications.insert(&evidence_id, &verifications);
+
+            // Emit event
+            self.env().emit_event(EvidenceVerified {
+                evidence_id,
+                verified_by: caller,
+                is_valid,
+                verified_at: now,
+            });
+
+            Ok(())
+        }
+
+        /// Get all evidence items for a claim
+        #[ink(message)]
+        pub fn get_claim_evidence(&self, claim_id: u64) -> Vec<EvidenceItem> {
+            let evidence_ids = self.claim_evidence.get(&claim_id).unwrap_or_default();
+            let mut evidence_list = Vec::new();
+
+            for evidence_id in evidence_ids {
+                if let Some(evidence) = self.evidence_items.get(&evidence_id) {
+                    evidence_list.push(evidence);
+                }
+            }
+
+            evidence_list
+        }
+
+        /// Get specific evidence item by ID
+        #[ink(message)]
+        pub fn get_evidence(&self, evidence_id: u64) -> Option<EvidenceItem> {
+            self.evidence_items.get(&evidence_id)
+        }
+
+        /// Get all verifications for an evidence item
+        #[ink(message)]
+        pub fn get_evidence_verifications(&self, evidence_id: u64) -> Vec<EvidenceVerification> {
+            self.evidence_verifications.get(&evidence_id).unwrap_or_default()
+        }
+
+        /// Check if evidence has been verified by majority of verifiers
+        #[ink(message)]
+        pub fn is_evidence_verified(&self, evidence_id: u64) -> bool {
+            let verifications = self.evidence_verifications.get(&evidence_id).unwrap_or_default();
+            if verifications.is_empty() {
+                return false;
+            }
+
+            let valid_count = verifications.iter().filter(|v| v.is_valid).count();
+            let invalid_count = verifications.len() - valid_count;
+
+            valid_count > invalid_count
+        }
+
+        /// Get evidence verification status summary
+        #[ink(message)]
+        pub fn get_evidence_verification_status(
+            &self,
+            evidence_id: u64,
+        ) -> Option<(u64, u64, u64, bool)> {
+            // Returns (total_verifications, valid_count, invalid_count, is_consensus_valid)
+            let verifications = self.evidence_verifications.get(&evidence_id).unwrap_or_default();
+            if verifications.is_empty() {
+                return None;
+            }
+
+            let valid_count = verifications.iter().filter(|v| v.is_valid).count() as u64;
+            let invalid_count = verifications.iter().filter(|v| !v.is_valid).count() as u64;
+            let total = verifications.len() as u64;
+            let consensus = valid_count > invalid_count;
+
+            Some((total, valid_count, invalid_count, consensus))
+        }
+
+        /// Batch submit multiple evidence items for a claim (gas optimized)
+        #[ink(message)]
+        pub fn batch_submit_evidence(
+            &mut self,
+            claim_id: u64,
+            evidence_items: Vec<(String, String, Vec<u8>, u64, Option<String>)>,
+        ) -> Result<Vec<u64>, InsuranceError> {
+            let mut evidence_ids = Vec::new();
+
+            for (evidence_type, ipfs_hash, content_hash, file_size, metadata_url) in evidence_items {
+                let evidence_id = self.submit_evidence(
+                    claim_id,
+                    evidence_type,
+                    ipfs_hash,
+                    content_hash,
+                    file_size,
+                    metadata_url,
+                    None, // No description in batch mode
+                )?;
+                evidence_ids.push(evidence_id);
+            }
+
+            Ok(evidence_ids)
+        }
+
+        /// Calculate storage cost for evidence (for fee calculation)
+        #[ink(message)]
+        pub fn calculate_evidence_storage_cost(
+            &self,
+            evidence_id: u64,
+        ) -> Option<u128> {
+            if let Some(evidence) = self.evidence_items.get(&evidence_id) {
+                // Cost calculation: base cost + size-based cost + verification cost
+                let base_cost: u128 = 1000; // Base storage cost
+                let size_cost: u128 = (evidence.file_size as u128) * 10; // Per byte cost
+                let verification_bonus: u128 = if evidence.verified { 500 } else { 0 };
+                
+                Some(base_cost + size_cost + verification_bonus)
+            } else {
+                None
+            }
+        }
+
+        /// Get total storage costs for all evidence in a claim
+        #[ink(message)]
+        pub fn get_claim_evidence_total_cost(&self, claim_id: u64) -> u128 {
+            let evidence_ids = self.claim_evidence.get(&claim_id).unwrap_or_default();
+            let mut total_cost: u128 = 0;
+
+            for evidence_id in evidence_ids {
+                if let Some(cost) = self.calculate_evidence_storage_cost(evidence_id) {
+                    total_cost += cost;
+                }
+            }
+
+            total_cost
+        }
+
+        /// Internal helper: Verify IPFS accessibility (simplified - would use IPFS gateway in production)
+        fn verify_ipfs_accessibility(&self, _ipfs_hash: &str) -> bool {
+            // In production, this would check IPFS gateway accessibility
+            // For now, we accept all valid-format hashes
+            true
+        }
+
+        /// Internal helper: Verify content hash format
+        fn verify_content_hash(&self, hash: &[u8]) -> bool {
+            hash.len() == 32 // SHA-256 hash length
         }
 
         // =====================================================================
@@ -1981,6 +2578,12 @@ mod insurance_tests {
         ClaimStatus, CoverageType, EvidenceMetadata, InsuranceError, PolicyStatus,
         PropertyInsurance,
     };
+
+#[cfg(test)]
+mod expiration_tests;
+
+#[cfg(test)]
+mod evidence_tests;
 
     fn valid_evidence() -> EvidenceMetadata {
         EvidenceMetadata {
