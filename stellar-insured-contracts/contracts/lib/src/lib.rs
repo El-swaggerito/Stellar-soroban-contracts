@@ -3062,8 +3062,30 @@ mod propchain_contracts {
             Ok(())
         }
         fn check_trigger_condition(&mut self, bond_id: u64) -> Result<bool, Self::Error> {
-            let bond = self.cat_bonds.get(bond_id).ok_or(Error::BondNotFound)?;
-            Ok(bond.is_triggered)
+            let mut bond = self.cat_bonds.get(bond_id).ok_or(Error::BondNotFound)?;
+            if bond.is_triggered {
+                return Ok(true);
+            }
+
+            // Use the ClaimOracle trait for the cross-contract call
+            use ink::env::call::FromAccountId;
+            let oracle: ink::contract_ref!(ClaimOracle) =
+                FromAccountId::from_account_id(bond.trigger_oracle);
+
+            // The event_id for the oracle could be the bond_id or some other identifier.
+            // Let's assume bond_id is used as event_id.
+            match oracle.get_verified_value(bond_id) {
+                Ok(value) => {
+                    if value >= bond.trigger_threshold {
+                        bond.is_triggered = true;
+                        self.cat_bonds.insert(bond_id, &bond);
+                        Ok(true)
+                    } else {
+                        Ok(false)
+                    }
+                }
+                Err(_) => Err(Error::OracleError), // Map oracle error to our contract's error
+            }
         }
         fn automate_payout(&mut self, bond_id: u64) -> Result<(), Self::Error> {
             self.ensure_not_paused()?;
