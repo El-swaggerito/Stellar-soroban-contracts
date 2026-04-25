@@ -874,6 +874,7 @@ mod propchain_insurance {
 
         /// Create a new risk pool (admin only)
         #[ink(message)]
+        #[must_use]
         pub fn create_risk_pool(
             &mut self,
             name: String,
@@ -1041,6 +1042,7 @@ mod propchain_insurance {
 
         /// Return the configured claim cooldown period.
         #[ink(message)]
+        #[must_use]
         pub fn claim_cooldown_period(&self) -> u64 {
             self.claim_cooldown_period
         }
@@ -1072,6 +1074,7 @@ mod propchain_insurance {
             /// Scan and expire policies whose `end_time` has passed. Anyone may call this to
             /// process automatic expirations. Returns the number of policies expired.
             #[ink(message)]
+            #[must_use]
             pub fn expire_policies(&mut self, max_scan: u64) -> u64 {
                 let mut expired_count: u64 = 0;
                 let now = self.env().block_timestamp();
@@ -1235,6 +1238,7 @@ mod propchain_insurance {
 
         /// Claim accrued rewards to the caller (checks-effects-interactions).
         #[ink(message)]
+        #[must_use]
         pub fn claim_rewards(&mut self, pool_id: u64) -> Result<u128, InsuranceError> {
             let caller = self.env().caller();
             let mut pool = self
@@ -1355,6 +1359,7 @@ mod propchain_insurance {
 
         /// Claim vested portion of previously-vested rewards for a provider
         #[ink(message)]
+        #[must_use]
         pub fn claim_vested_rewards(&mut self, pool_id: u64) -> Result<u128, InsuranceError> {
             let caller = self.env().caller();
             let mut pool = self
@@ -1455,6 +1460,7 @@ mod propchain_insurance {
 
         /// View vesting info for a provider
         #[ink(message)]
+        #[must_use]
         pub fn get_vesting_info(&self, pool_id: u64, provider: AccountId) -> (u128, u128, u64) {
             let p = self.liquidity_providers.get(&(pool_id, provider));
             if let Some(info) = p {
@@ -1466,6 +1472,7 @@ mod propchain_insurance {
 
         /// View: pending reward amount for an account (fixed-point accurate vs on-chain claim).
         #[ink(message)]
+        #[must_use]
         pub fn get_pending_rewards(&self, pool_id: u64, provider: AccountId) -> u128 {
             let Some(pool) = self.pools.get(&pool_id) else {
                 return 0;
@@ -1535,6 +1542,7 @@ mod propchain_insurance {
 
         /// Calculate premium for a policy
         #[ink(message)]
+        #[must_use]
         pub fn calculate_premium(
             &self,
             property_id: u64,
@@ -1801,6 +1809,7 @@ mod propchain_insurance {
 
         /// Submit an insurance claim
         #[ink(message)]
+        #[must_use]
         pub fn submit_claim(
             &mut self,
             policy_id: u64,
@@ -2055,6 +2064,7 @@ mod propchain_insurance {
         /// Batch approve multiple claims in a single transaction
         /// Returns summary with individual results for partial failure handling
         #[ink(message)]
+        #[must_use]
         pub fn batch_approve_claims(
             &mut self,
             claim_ids: Vec<u64>,
