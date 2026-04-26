@@ -10,21 +10,15 @@
 
 use ink::storage::Mapping;
 
-pub mod types;
-
-// Existing helper modules (unchanged)
-pub mod constants;
-pub mod errors;
-pub mod result_types;
-pub mod storage_helpers;
-pub mod storage_keys;
-pub mod storage_ttl;
+mod rbac;
+pub use rbac::{Role, RoleManager};
 
 /// Decentralized Property Insurance Platform
 #[ink::contract]
 mod propchain_insurance {
     use super::*;
     use ink::prelude::{string::String, vec::Vec};
+    use crate::{Role, RoleManager};
 
     pub use crate::types::{
         ActuarialModel, BatchClaimResult, BatchClaimSummary, ClaimStatus, CoverageType,
@@ -46,6 +40,9 @@ mod propchain_insurance {
     #[ink(storage)]
     pub struct PropertyInsurance {
         admin: AccountId,
+
+        // Role-based access control
+        role_manager: RoleManager,
 
         // Policies
         policies: Mapping<u64, InsurancePolicy>,
@@ -113,8 +110,12 @@ mod propchain_insurance {
         arbiter: Option<AccountId>,
 
         // Security: track used evidence nonces to prevent replay attacks
-        used_evidence_nonces: Mapping<(u64, String), bool>,
-
+        used_evidence_nonces: Mapping<(u64, String), bool>, // (property_id, nonce) -> bool
+        
+        // Per-caller monotonic nonce counter for replay protection (#349)
+        // Callers must supply their current nonce; it is incremented on each accepted submit_claim.
+        caller_nonces: Mapping<AccountId, u64>,
+        
         // Emergency pause mechanism
         is_paused: bool,
         // Time-lock for admin operations
@@ -133,6 +134,324 @@ mod propchain_insurance {
     // =========================================================================
     // IMPLEMENTATION  (extracted to insurance_impl.rs)
     // =========================================================================
+
+    #[ink(event)]
+    pub struct PolicyCreated {
+        #[ink(topic)]
+        policy_id: u64,
+        #[ink(topic)]
+        policyholder: AccountId,
+        #[ink(topic)]
+        property_id: u64,
+        coverage_type: CoverageType,
+        coverage_amount: u128,
+        premium_amount: u128,
+        start_time: u64,
+        end_time: u64,
+    }
+
+    #[ink(event)]
+    pub struct PolicyIssued {
+        #[ink(topic)]
+        policy_id: u64,
+        #[ink(topic)]
+        holder: AccountId,
+        coverage_amount: u128,
+        premium_amount: u128,
+        timestamp: u64,
+    }
+
+    #[ink(event)]
+    pub struct PolicyCancelled {
+        #[ink(topic)]
+        policy_id: u64,
+        #[ink(topic)]
+        policyholder: AccountId,
+        cancelled_at: u64,
+        reason: Option<String>,
+    }
+
+    #[ink(event)]
+    pub struct PolicyRenewed {
+        #[ink(topic)]
+        policy_id: u64,
+        #[ink(topic)]
+        holder: AccountId,
+        renewal_premium: u128,
+        new_end_time: u64,
+        timestamp: u64,
+    }
+
+    #[ink(event)]
+    pub struct PolicyExpired {
+        #[ink(topic)]
+        policy_id: u64,
+        #[ink(topic)]
+        holder: AccountId,
+        timestamp: u64,
+    }
+
+    #[ink(event)]
+    pub struct ClaimSubmitted {
+        #[ink(topic)]
+        claim_id: u64,
+        #[ink(topic)]
+        policy_id: u64,
+        #[ink(topic)]
+        claimant: AccountId,
+        claim_amount: u128,
+        submitted_at: u64,
+    }
+
+    #[ink(event)]
+    pub struct ClaimApproved {
+        #[ink(topic)]
+        claim_id: u64,
+        #[ink(topic)]
+        policy_id: u64,
+        payout_amount: u128,
+        approved_by: AccountId,
+        timestamp: u64,
+    }
+
+    #[ink(event)]
+    pub struct ClaimRejected {
+        #[ink(topic)]
+        claim_id: u64,
+        #[ink(topic)]
+        policy_id: u64,
+        reason: String,
+        rejected_by: AccountId,
+        timestamp: u64,
+    }
+
+    #[ink(event)]
+    pub struct PayoutExecuted {
+        #[ink(topic)]
+        claim_id: u64,
+        #[ink(topic)]
+        recipient: AccountId,
+        amount: u128,
+        timestamp: u64,
+    }
+
+    #[ink(event)]
+    pub struct PoolCapitalized {
+        #[ink(topic)]
+        pool_id: u64,
+        #[ink(topic)]
+        provider: AccountId,
+        amount: u128,
+        timestamp: u64,
+    }
+
+    #[ink(event)]
+    pub struct LiquidityDeposited {
+        #[ink(topic)]
+        pool_id: u64,
+        #[ink(topic)]
+        provider: AccountId,
+        amount: u128,
+        accumulated_reward_per_share: u128,
+        timestamp: u64,
+    }
+
+    #[ink(event)]
+    pub struct LiquidityWithdrawn {
+        #[ink(topic)]
+        pool_id: u64,
+        #[ink(topic)]
+        provider: AccountId,
+        principal: u128,
+        rewards_paid: u128,
+        accumulated_reward_per_share: u128,
+        timestamp: u64,
+    }
+
+    #[ink(event)]
+    pub struct RewardsClaimed {
+        #[ink(topic)]
+        pool_id: u64,
+        #[ink(topic)]
+        provider: AccountId,
+        amount: u128,
+        accumulated_reward_per_share: u128,
+        timestamp: u64,
+    }
+
+    #[ink(event)]
+    pub struct RewardsReinvested {
+        #[ink(topic)]
+        pool_id: u64,
+        #[ink(topic)]
+        provider: AccountId,
+        amount: u128,
+        new_stake: u128,
+        accumulated_reward_per_share: u128,
+        timestamp: u64,
+    }
+
+    #[ink(event)]
+    pub struct RewardsVestingStarted {
+        #[ink(topic)]
+        pool_id: u64,
+        #[ink(topic)]
+        provider: AccountId,
+        amount: u128,
+        vesting_start: u64,
+        vesting_cliff: u64,
+        vesting_duration: u64,
+    }
+
+    #[ink(event)]
+    pub struct VestedRewardsClaimed {
+        #[ink(topic)]
+        pool_id: u64,
+        #[ink(topic)]
+        provider: AccountId,
+        amount: u128,
+        timestamp: u64,
+    }
+
+    #[ink(event)]
+    pub struct ReinsuranceActivated {
+        #[ink(topic)]
+        claim_id: u64,
+        agreement_id: u64,
+        recovery_amount: u128,
+        timestamp: u64,
+    }
+
+    #[ink(event)]
+    pub struct InsuranceTokenMinted {
+        #[ink(topic)]
+        token_id: u64,
+        #[ink(topic)]
+        policy_id: u64,
+        #[ink(topic)]
+        owner: AccountId,
+        face_value: u128,
+    }
+
+    #[ink(event)]
+    pub struct InsuranceTokenTransferred {
+        #[ink(topic)]
+        token_id: u64,
+        #[ink(topic)]
+        from: AccountId,
+        #[ink(topic)]
+        to: AccountId,
+        price: u128,
+    }
+
+    #[ink(event)]
+    pub struct RiskAssessmentUpdated {
+        #[ink(topic)]
+        property_id: u64,
+        overall_score: u32,
+        risk_level: RiskLevel,
+        timestamp: u64,
+    }
+
+    #[ink(event)]
+    pub struct EvidenceSubmitted {
+        #[ink(topic)]
+        evidence_id: u64,
+        #[ink(topic)]
+        raised_by: AccountId,
+        dispute_deadline: u64,
+        previous_status: ClaimStatus,
+        timestamp: u64,
+        claim_id: u64,
+        evidence_type: String,
+        ipfs_hash: String,
+        submitter: AccountId,
+        submitted_at: u64,
+    }
+
+    #[ink(event)]
+    pub struct EvidenceVerified {
+        #[ink(topic)]
+        evidence_id: u64,
+        verified_by: AccountId,
+        is_valid: bool,
+        verified_at: u64,
+    }
+    
+    #[ink(event)]
+    pub struct ContractPaused {
+        #[ink(topic)]
+        paused_by: AccountId,
+        timestamp: u64,
+    }
+    
+    #[ink(event)]
+    pub struct ContractUnpaused {
+        #[ink(topic)]
+        unpaused_by: AccountId,
+        timestamp: u64,
+    }
+
+    /// Emitted when a pause is proposed; executes after time-lock delay (#301)
+    #[ink(event)]
+    pub struct PauseProposed {
+        #[ink(topic)]
+        proposed_by: AccountId,
+        earliest_execution: u64,
+    }
+
+    /// Emitted when a new admin is proposed; executes after time-lock delay (#301)
+    #[ink(event)]
+    pub struct AdminProposed {
+        #[ink(topic)]
+        proposed_by: AccountId,
+        #[ink(topic)]
+        new_admin: AccountId,
+        earliest_execution: u64,
+    }
+
+    /// Emitted when a pending admin change is executed (#301)
+    #[ink(event)]
+    pub struct AdminChanged {
+        #[ink(topic)]
+        old_admin: AccountId,
+        #[ink(topic)]
+        new_admin: AccountId,
+        timestamp: u64,
+    }
+
+    /// Emitted when a claim submission is accepted and the caller nonce is consumed (#349)
+    #[ink(event)]
+    pub struct ReplayProtected {
+        #[ink(topic)]
+        caller: AccountId,
+        nonce: u64,
+        claim_id: u64,
+    }
+
+    /// Emitted when a role is granted to an account (#346)
+    #[ink(event)]
+    pub struct RoleGranted {
+        #[ink(topic)]
+        account: AccountId,
+        role: Role,
+        granted_by: AccountId,
+    }
+
+    /// Emitted when a role is revoked from an account (#346)
+    #[ink(event)]
+    pub struct RoleRevoked {
+        #[ink(topic)]
+        account: AccountId,
+        role: Role,
+        revoked_by: AccountId,
+    }
+
+    // =========================================================================
+    // IMPLEMENTATION
+    // =========================================================================
+
+    // Core contract behavior is extracted to keep the root module focused on types and wiring.
     include!("insurance_impl.rs");
 
     impl Default for PropertyInsurance {

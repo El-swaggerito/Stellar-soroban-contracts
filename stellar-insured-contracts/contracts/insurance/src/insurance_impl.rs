@@ -1,8 +1,11 @@
     impl PropertyInsurance {
         #[ink(constructor)]
         pub fn new(admin: AccountId) -> Self {
+            let mut role_manager = RoleManager::default();
+            role_manager.grant(admin, Role::Admin);
             Self {
                 admin,
+                role_manager,
                 policies: Mapping::default(),
                 policy_count: 0,
                 policyholder_policies: Mapping::default(),
@@ -37,6 +40,7 @@
                 dispute_window_seconds: 604_800,   // #134 – 7 days default
                 arbiter: None,                     // #134 – falls back to admin
                 used_evidence_nonces: Mapping::default(),
+                caller_nonces: Mapping::default(),
                 is_paused: false,
                 pending_pause_after: None,
                 pending_admin: None,
@@ -65,7 +69,7 @@
             max_coverage_ratio: u32,
             reinsurance_threshold: u128,
         ) -> Result<u64, InsuranceError> {
-            self.ensure_admin()?;
+            self.ensure_role(Role::Admin)?;
             
             // Input validation
             if name.is_empty() {
@@ -261,7 +265,7 @@
             vesting_duration_seconds: u64,
             early_withdrawal_penalty_bps: u32,
         ) -> Result<(), InsuranceError> {
-            self.ensure_admin()?;
+            self.ensure_role(Role::Admin)?;
             let mut pool = self.pools.get(&pool_id).ok_or(InsuranceError::PoolNotFound)?;
             pool.vesting_cliff_seconds = vesting_cliff_seconds;
             pool.vesting_duration_seconds = vesting_duration_seconds;
@@ -705,7 +709,7 @@
             valid_for_seconds: u64,
         ) -> Result<(), InsuranceError> {
             let caller = self.env().caller();
-            if caller != self.admin && !self.authorized_oracles.get(&caller).unwrap_or(false) {
+            if !self.role_manager.has_role(caller, Role::Oracle) {
                 return Err(InsuranceError::Unauthorized);
             }
 
@@ -978,7 +982,7 @@
                 .get(&policy_id)
                 .ok_or(InsuranceError::PolicyNotFound)?;
 
-            if caller != policy.policyholder && caller != self.admin {
+            if caller != policy.policyholder && !self.role_manager.has_role(caller, Role::Admin) {
                 return Err(InsuranceError::Unauthorized);
             }
 
@@ -1021,6 +1025,7 @@
             claim_amount: u128,
             description: String,
             evidence: EvidenceMetadata,
+            nonce: u64,
         ) -> Result<u64, InsuranceError> {
             // Require explicit authorization for this operation
             self.env().require_auth();
@@ -1031,6 +1036,12 @@
             // Check if contract is paused
             if self.is_paused {
                 return Err(InsuranceError::ContractPaused);
+            }
+
+            // #349 – per-caller monotonic nonce check (prevents replay / double-execution)
+            let expected_nonce = self.caller_nonces.get(&caller).unwrap_or(0);
+            if nonce != expected_nonce {
+                return Err(InsuranceError::NonceAlreadyUsed);
             }
 
             // Input validation for claim amount
@@ -1162,6 +1173,14 @@
             // Record per-caller timestamp for rate limiting (#300)
             self.caller_last_claim.insert(&caller, &now);
 
+            // #349 – increment caller nonce so the same nonce cannot be reused
+            self.caller_nonces.insert(&caller, &(expected_nonce.saturating_add(1)));
+            self.env().emit_event(ReplayProtected {
+                caller,
+                nonce: expected_nonce,
+                claim_id,
+            });
+
             self.env().emit_event(ClaimSubmitted {
                 claim_id,
                 policy_id,
@@ -1205,7 +1224,7 @@
                 return Err(InsuranceError::ContractPaused);
             }
 
-            if caller != self.admin && !self.authorized_assessors.get(&caller).unwrap_or(false) {
+            if !self.role_manager.has_role(caller, Role::Assessor) {
                 return Err(InsuranceError::Unauthorized);
             }
 
@@ -1281,7 +1300,7 @@
         ) -> Result<BatchClaimSummary, InsuranceError> {
             let caller = self.env().caller();
 
-            if caller != self.admin && !self.authorized_assessors.get(&caller).unwrap_or(false) {
+            if !self.role_manager.has_role(caller, Role::Assessor) {
                 return Err(InsuranceError::Unauthorized);
             }
 
@@ -1347,7 +1366,7 @@
         ) -> Result<BatchClaimSummary, InsuranceError> {
             let caller = self.env().caller();
 
-            if caller != self.admin && !self.authorized_assessors.get(&caller).unwrap_or(false) {
+            if !self.role_manager.has_role(caller, Role::Assessor) {
                 return Err(InsuranceError::Unauthorized);
             }
 
@@ -1543,7 +1562,9 @@
 
             // Verify caller is authorized (claimant, assessor, or admin)
             let is_authorized =
-                caller == claim.claimant || claim.assessor == Some(caller) || caller == self.admin;
+                caller == claim.claimant
+                    || claim.assessor == Some(caller)
+                    || self.role_manager.has_role(caller, Role::Admin);
 
             if !is_authorized {
                 return Err(InsuranceError::Unauthorized);
@@ -1610,8 +1631,7 @@
             let now = self.env().block_timestamp();
 
             // Verify caller is authorized (admin or authorized assessor)
-            let is_assessor = self.authorized_assessors.get(&caller).unwrap_or(false);
-            if caller != self.admin && !is_assessor {
+            if !self.role_manager.has_role(caller, Role::Assessor) {
                 return Err(InsuranceError::Unauthorized);
             }
 
@@ -1824,7 +1844,7 @@
             coverage_types: Vec<CoverageType>,
             duration_seconds: u64,
         ) -> Result<u64, InsuranceError> {
-            self.ensure_admin()?;
+            self.ensure_role(Role::Admin)?;
 
             let now = self.env().block_timestamp();
             let agreement_id = self.reinsurance_count + 1;
@@ -1961,7 +1981,7 @@
             data_points: u32,
         ) -> Result<u64, InsuranceError> {
             let caller = self.env().caller();
-            if caller != self.admin && !self.authorized_oracles.get(&caller).unwrap_or(false) {
+            if !self.role_manager.has_role(caller, Role::Oracle) {
                 return Err(InsuranceError::Unauthorized);
             }
 
@@ -1999,7 +2019,7 @@
             max_previous_claims: u32,
             min_risk_score: u32,
         ) -> Result<(), InsuranceError> {
-            self.ensure_admin()?;
+            self.ensure_role(Role::Admin)?;
             self.pools
                 .get(&pool_id)
                 .ok_or(InsuranceError::PoolNotFound)?;
@@ -2022,34 +2042,68 @@
         // ADMIN / AUTHORITY MANAGEMENT
         // =====================================================================
 
-        /// Authorize an oracle address
+        /// Grant `role` to `account` (admin only). Emits `RoleGranted`. (#346)
+        #[ink(message)]
+        pub fn grant_role(&mut self, account: AccountId, role: Role) -> Result<(), InsuranceError> {
+            self.ensure_role(Role::Admin)?;
+            self.role_manager.grant(account, role);
+            self.env().emit_event(RoleGranted {
+                account,
+                role,
+                granted_by: self.env().caller(),
+            });
+            Ok(())
+        }
+
+        /// Revoke `role` from `account` (admin only). Emits `RoleRevoked`. (#346)
+        #[ink(message)]
+        pub fn revoke_role(&mut self, account: AccountId, role: Role) -> Result<(), InsuranceError> {
+            self.ensure_role(Role::Admin)?;
+            self.role_manager.revoke(account, role);
+            self.env().emit_event(RoleRevoked {
+                account,
+                role,
+                revoked_by: self.env().caller(),
+            });
+            Ok(())
+        }
+
+        /// Return `true` if `account` holds `role`. (#346)
+        #[ink(message)]
+        pub fn has_role(&self, account: AccountId, role: Role) -> bool {
+            self.role_manager.has_role(account, role)
+        }
+
+        /// Return all roles held by `account`. (#346)
+        #[ink(message)]
+        pub fn get_roles(&self, account: AccountId) -> Vec<Role> {
+            self.role_manager.roles_of(account)
+        }
+
+        /// Authorize an oracle address (backwards-compatible wrapper)
         #[ink(message)]
         pub fn authorize_oracle(&mut self, oracle: AccountId) -> Result<(), InsuranceError> {
-            self.ensure_admin()?;
-            self.authorized_oracles.insert(&oracle, &true);
-            Ok(())
+            self.grant_role(oracle, Role::Oracle)
         }
 
         /// Set oracle contract for parametric claims (admin only)
         #[ink(message)]
         pub fn set_oracle_contract(&mut self, oracle: AccountId) -> Result<(), InsuranceError> {
-            self.ensure_admin()?;
+            self.ensure_role(Role::Admin)?;
             self.oracle_contract = Some(oracle);
             Ok(())
         }
 
-        /// Authorize a claims assessor
+        /// Authorize a claims assessor (backwards-compatible wrapper)
         #[ink(message)]
         pub fn authorize_assessor(&mut self, assessor: AccountId) -> Result<(), InsuranceError> {
-            self.ensure_admin()?;
-            self.authorized_assessors.insert(&assessor, &true);
-            Ok(())
+            self.grant_role(assessor, Role::Assessor)
         }
 
         /// Update platform fee rate (admin only)
         #[ink(message)]
         pub fn set_platform_fee_rate(&mut self, rate: u32) -> Result<(), InsuranceError> {
-            self.ensure_admin()?;
+            self.ensure_role(Role::Admin)?;
             if rate > 1000 {
                 return Err(InsuranceError::InvalidParameters); // Max 10%
             }
@@ -2060,7 +2114,7 @@
         /// Update claim cooldown period (admin only)
         #[ink(message)]
         pub fn set_claim_cooldown(&mut self, period_seconds: u64) -> Result<(), InsuranceError> {
-            self.ensure_admin()?;
+            self.ensure_role(Role::Admin)?;
             self.claim_cooldown_period = period_seconds;
             Ok(())
         }
@@ -2080,13 +2134,20 @@
         pub fn get_claim(&self, claim_id: u64) -> Option<InsuranceClaim> {
             self.claims.get(&claim_id)
         }
+
+        /// Return the next expected nonce for `caller`. (#349)
+        /// Callers must pass this value as the `nonce` argument to `submit_claim`.
+        #[ink(message)]
+        pub fn get_nonce(&self, caller: AccountId) -> u64 {
+            self.caller_nonces.get(&caller).unwrap_or(0)
+        }
         
         /// Step 1 of 2: propose pausing the contract.
         /// The pause will only take effect after `admin_timelock_delay` seconds
         /// have elapsed and `execute_pause` is called (#301).
         #[ink(message)]
         pub fn propose_pause(&mut self) -> Result<(), InsuranceError> {
-            self.ensure_admin()?;
+            self.ensure_role(Role::Admin)?;
             if self.is_paused {
                 return Err(InsuranceError::InvalidParameters);
             }
@@ -2107,7 +2168,7 @@
         /// delay has elapsed (#301).
         #[ink(message)]
         pub fn execute_pause(&mut self) -> Result<(), InsuranceError> {
-            self.ensure_admin()?;
+            self.ensure_role(Role::Admin)?;
             let earliest = self.pending_pause_after
                 .ok_or(InsuranceError::InvalidParameters)?;
             if self.env().block_timestamp() < earliest {
@@ -2127,7 +2188,7 @@
         /// For non-emergency use, prefer `propose_pause` + `execute_pause`.
         #[ink(message)]
         pub fn pause(&mut self) -> Result<(), InsuranceError> {
-            self.ensure_admin()?;
+            self.ensure_role(Role::Admin)?;
             if self.is_paused {
                 return Err(InsuranceError::InvalidParameters);
             }
@@ -2142,7 +2203,7 @@
         /// Unpause contract operations (admin only)
         #[ink(message)]
         pub fn unpause(&mut self) -> Result<(), InsuranceError> {
-            self.ensure_admin()?;
+            self.ensure_role(Role::Admin)?;
             if !self.is_paused {
                 return Err(InsuranceError::InvalidParameters);
             }
@@ -2165,7 +2226,7 @@
         /// and a call to `execute_set_admin` (#301).
         #[ink(message)]
         pub fn propose_set_admin(&mut self, new_admin: AccountId) -> Result<(), InsuranceError> {
-            self.ensure_admin()?;
+            self.ensure_role(Role::Admin)?;
             if self.pending_admin_after.is_some() {
                 return Err(InsuranceError::TimeLockPending);
             }
@@ -2185,7 +2246,7 @@
         /// time-lock delay has elapsed (#301).
         #[ink(message)]
         pub fn execute_set_admin(&mut self) -> Result<(), InsuranceError> {
-            self.ensure_admin()?;
+            self.ensure_role(Role::Admin)?;
             let earliest = self.pending_admin_after
                 .ok_or(InsuranceError::InvalidParameters)?;
             if self.env().block_timestamp() < earliest {
@@ -2208,7 +2269,7 @@
         /// Cancel a pending admin proposal (admin only) (#301).
         #[ink(message)]
         pub fn cancel_pending_admin(&mut self) -> Result<(), InsuranceError> {
-            self.ensure_admin()?;
+            self.ensure_role(Role::Admin)?;
             self.pending_admin = None;
             self.pending_admin_after = None;
             Ok(())
@@ -2505,8 +2566,9 @@
                 pool.accumulated_reward_per_share.saturating_add(inc);
         }
 
-        fn ensure_admin(&self) -> Result<(), InsuranceError> {
-            if self.env().caller() != self.admin {
+        /// Check that the caller holds `role` (or Admin, which satisfies every role).
+        fn ensure_role(&self, role: Role) -> Result<(), InsuranceError> {
+            if !self.role_manager.has_role(self.env().caller(), role) {
                 return Err(InsuranceError::Unauthorized);
             }
             Ok(())
