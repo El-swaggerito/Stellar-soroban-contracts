@@ -17,6 +17,8 @@ use validation::{
 };
 
 const CONTRACT_VERSION: u32 = 1;
+const MAX_SUPPORTED_CHAINS: u32 = 20;
+const MAX_OPERATORS: u32 = 10;
 
 #[contract]
 pub struct PropertyBridge;
@@ -36,6 +38,10 @@ impl PropertyBridge {
             panic!("Already initialized");
         }
         require_non_zero_address(&admin);
+
+        if supported_chains.len() > MAX_SUPPORTED_CHAINS {
+            panic!("Too many chains");
+        }
 
         let config = BridgeConfig {
             supported_chains: supported_chains.clone(),
@@ -94,10 +100,18 @@ impl PropertyBridge {
         required_signatures: u32,
         timeout_blocks: Option<u64>,
         metadata: PropertyMetadata,
+        nonce: u64,
     ) -> u64 {
         caller.require_auth();
         require_non_zero_address(&caller);
         require_non_zero_address(&recipient);
+
+        // Nonce validation for replay protection (#349)
+        let current_nonce: u64 = env.storage().persistent().get(&DataKey::Nonce(caller.clone())).unwrap_or(0);
+        if nonce != current_nonce + 1 {
+            panic!("Invalid nonce");
+        }
+        env.storage().persistent().set(&DataKey::Nonce(caller.clone()), &nonce);
 
         // Read config once and reuse — avoids redundant storage reads (#351, #353).
         let config: BridgeConfig = env.storage().instance().get(&DataKey::Config).unwrap();
@@ -147,6 +161,7 @@ impl PropertyBridge {
         operator.require_auth();
         require_non_zero_address(&operator);
         require_operator(&env, &operator);
+        require_not_paused(&env);
 
         let mut request: MultisigBridgeRequest = env
             .storage()
@@ -186,6 +201,7 @@ impl PropertyBridge {
         operator.require_auth();
         require_non_zero_address(&operator);
         require_operator(&env, &operator);
+        require_not_paused(&env);
 
         let mut request: MultisigBridgeRequest = env
             .storage()
@@ -264,6 +280,7 @@ impl PropertyBridge {
         admin.require_auth();
         require_non_zero_address(&admin);
         require_admin(&env, &admin);
+        require_not_paused(&env);
 
         let mut request: MultisigBridgeRequest = env
             .storage()
@@ -402,62 +419,6 @@ impl PropertyBridge {
         );
     }
 
-    pub fn get_history(env: Env, account: Address) -> Vec<BridgeTransaction> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::History(account))
-            .unwrap_or(Vec::new(&env))
-        /// Pause bridge operations before a migration export/import begins.
-        #[ink(message)]
-        fn pause_for_migration(&mut self) -> Result<(), Error> {
-            self.ensure_admin()?;
-            self.config.emergency_pause = true;
-            Ok(())
-        }
-
-        /// Resume bridge operations after migration data has been handled.
-        #[ink(message)]
-        fn resume_after_migration(&mut self) -> Result<(), Error> {
-            self.ensure_admin()?;
-            self.config.emergency_pause = false;
-            Ok(())
-        }
-
-        /// Export a serialized storage chunk for migration tooling.
-        #[ink(message)]
-        fn extract_data_chunk(&self, _chunk_id: u32, _start_index: u32, _count: u32) -> Result<Vec<u8>, Error> {
-            self.ensure_admin()?;
-            // In a real implementation, this would serialize a chunk of storage
-            // For now, return an empty vec as a placeholder
-            Ok(Vec::new())
-        }
-
-        /// Import serialized storage data into the bridge during migration.
-        #[ink(message)]
-        fn initialize_with_migrated_data(&mut self, _data: Vec<u8>) -> Result<(), Error> {
-            self.ensure_admin()?;
-            // Logic to deserialize and populate storage
-            Ok(())
-        }
-
-        /// Confirm migrated bridge state is internally consistent.
-        #[ink(message)]
-        fn verify_migration(&self) -> Result<bool, Error> {
-            // Logic to verify checksums or record counts
-            Ok(true)
-        }
-    }
-
-    impl PropertyBridge {
-        /// Require the caller to be the bridge admin for privileged operations.
-        fn ensure_admin(&self) -> Result<(), Error> {
-            if self.env().caller() != self.admin {
-                return Err(Error::Unauthorized);
-            }
-            Ok(())
-        }
-    }
-
     pub fn add_operator(env: Env, admin: Address, operator: Address) {
         admin.require_auth();
         require_non_zero_address(&admin);
@@ -466,6 +427,11 @@ impl PropertyBridge {
 
         let mut operators: Vec<Address> =
             env.storage().instance().get(&DataKey::Operators).unwrap();
+        
+        if operators.len() >= MAX_OPERATORS {
+            panic!("Too many operators");
+        }
+
         if !operators.contains(operator.clone()) {
             operators.push_back(operator.clone());
             env.storage().instance().set(&DataKey::Operators, &operators);
