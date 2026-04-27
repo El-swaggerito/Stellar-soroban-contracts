@@ -90,6 +90,8 @@ impl SlashingContract {
     }
 
     pub fn configure_penalty_parameters(env: Env, role: Symbol, params: PenaltyParams) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("Contract not initialized"));
         let admin = get_admin(&env);
         admin.require_auth();
 
@@ -107,6 +109,8 @@ impl SlashingContract {
     }
 
     pub fn slash_funds(env: Env, target: Address, role: Symbol, reason: String, amount: i128) {
+        let governance: Address = env.storage().instance().get(&DataKey::Governance)
+            .unwrap_or_else(|| panic!("Contract not initialized"));
         let governance = get_governance(&env);
         governance.require_auth();
 
@@ -150,6 +154,8 @@ impl SlashingContract {
     }
 
     pub fn add_slashable_role(env: Env, role: Symbol) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("Contract not initialized"));
         let admin = get_admin(&env);
         admin.require_auth();
 
@@ -172,6 +178,8 @@ impl SlashingContract {
     }
 
     pub fn remove_slashable_role(env: Env, role: Symbol) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("Contract not initialized"));
         let admin = get_admin(&env);
         admin.require_auth();
 
@@ -221,6 +229,8 @@ impl SlashingContract {
     }
 
     pub fn pause(env: Env) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("Contract not initialized"));
         let admin = get_admin(&env);
         admin.require_auth();
         env.storage().instance().set(&DataKey::Paused, &true);
@@ -236,6 +246,8 @@ impl SlashingContract {
     }
 
     pub fn unpause(env: Env) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("Contract not initialized"));
         let admin = get_admin(&env);
         admin.require_auth();
         env.storage().instance().set(&DataKey::Paused, &false);

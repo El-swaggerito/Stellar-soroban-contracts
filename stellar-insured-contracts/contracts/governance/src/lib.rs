@@ -99,6 +99,9 @@ impl GovernanceContract {
         counter += 1;
         env.storage().instance().set(&DataKey::ProposalCounter, &counter);
 
+        let voting_period: u64 = env.storage().instance().get(&DataKey::VotingPeriod)
+            .unwrap_or_else(|| panic!("Contract not initialized"));
+        
         let proposal = Proposal {
             id: counter,
             title,

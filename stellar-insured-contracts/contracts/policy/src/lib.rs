@@ -54,6 +54,8 @@ impl PolicyContract {
         duration_days: u32,
         policy_type: PolicyType,
     ) -> u64 {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("Contract not initialized"));
         let admin = get_admin(&env);
         admin.require_auth();
 
@@ -61,7 +63,8 @@ impl PolicyContract {
         counter += 1;
         env.storage().instance().set(&DataKey::PolicyCounter, &counter);
 
-        let risk_pool: Address = env.storage().instance().get(&DataKey::RiskPool).unwrap();
+        let risk_pool: Address = env.storage().instance().get(&DataKey::RiskPool)
+            .unwrap_or_else(|| panic!("Contract not initialized"));
 
         let policy = InsurancePolicy {
             policy_id: counter,
