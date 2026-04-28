@@ -11,6 +11,9 @@ pub enum DataKey {
     RiskPool,
     Claim(u64),
     ClaimCounter,
+    /// #409: Maps policy_id -> active claim_id. Present only while a claim is active
+    /// (Submitted / UnderReview / Approved). Cleared on Rejected or Settled.
+    PolicyActiveClaim(u64),
 }
 
 // --- Storage helpers (#378: data access abstraction) ---
@@ -67,18 +70,9 @@ impl ClaimsContract {
             panic!("Claim amount invalid or exceeds coverage");
         }
 
-        // #408: Check for duplicate claims - prevent same policy from having multiple active claims
-        let counter = get_claim_counter(&env);
-        for claim_id in 1..=counter {
-            let existing_claim = env.storage().persistent().get(&DataKey::Claim(claim_id));
-            if let Some(claim) = existing_claim {
-                if claim.policy_id == policy_id 
-                    && (claim.status == ClaimStatus::Submitted 
-                        || claim.status == ClaimStatus::UnderReview 
-                        || claim.status == ClaimStatus::Approved) {
-                    panic!("Policy already has an active claim");
-                }
-            }
+        // #409: O(1) duplicate claim check — reject if an active claim already exists for this policy
+        if env.storage().persistent().has(&DataKey::PolicyActiveClaim(policy_id)) {
+            panic!("Policy already has an active claim");
         }
 
         // #408: Verify policy hasn't expired
@@ -105,6 +99,9 @@ impl ClaimsContract {
         };
 
         set_claim(&env, counter, &claim);
+
+        // #409: Record the active claim for this policy (O(1) dedup key)
+        env.storage().persistent().set(&DataKey::PolicyActiveClaim(policy_id), &counter);
 
         // #412: Enhanced event emission with more details
         env.events().publish(
@@ -165,6 +162,9 @@ impl ClaimsContract {
         claim.status = ClaimStatus::Rejected;
         set_claim(&env, claim_id, &claim);
 
+        // #409: Clear the active-claim lock so a new claim can be submitted for this policy
+        env.storage().persistent().remove(&DataKey::PolicyActiveClaim(claim.policy_id));
+
         // #412: Enhanced event emission
         env.events().publish(
             (symbol_short!("claim"), symbol_short!("rejected")),
@@ -173,8 +173,6 @@ impl ClaimsContract {
     }
 
     pub fn settle_claim(env: Env, claim_id: u64) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin)
-            .unwrap_or_else(|| panic!("Contract not initialized"));
         let admin = get_admin(&env);
         admin.require_auth();
 
@@ -207,6 +205,9 @@ impl ClaimsContract {
 
         claim.status = ClaimStatus::Settled;
         set_claim(&env, claim_id, &claim);
+
+        // #409: Clear the active-claim lock after settlement
+        env.storage().persistent().remove(&DataKey::PolicyActiveClaim(claim.policy_id));
 
         // #412: Enhanced event emission
         env.events().publish(
