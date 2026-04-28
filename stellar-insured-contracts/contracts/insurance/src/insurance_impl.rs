@@ -208,6 +208,9 @@
             pub fn renew_policy(&mut self, policy_id: u64, duration_seconds: u64) -> Result<(), InsuranceError> {
                 let caller = self.env().caller();
                 let paid = self.env().transferred_value();
+                if duration_seconds == 0 {
+                    return Err(InsuranceError::InvalidParameters);
+                }
                 if paid == 0 {
                     return Err(InsuranceError::InsufficientPremium);
                 }
@@ -271,6 +274,15 @@
         ) -> Result<(), InsuranceError> {
             self.ensure_role(Role::Admin)?;
             let mut pool = self.pools.get(&pool_id).ok_or(InsuranceError::PoolNotFound)?;
+            if vesting_duration_seconds == 0 {
+                if vesting_cliff_seconds != 0 || early_withdrawal_penalty_bps != 0 {
+                    return Err(InsuranceError::InvalidParameters);
+                }
+            } else if vesting_cliff_seconds > vesting_duration_seconds
+                || early_withdrawal_penalty_bps > 10_000
+            {
+                return Err(InsuranceError::InvalidParameters);
+            }
             pool.vesting_cliff_seconds = vesting_cliff_seconds;
             pool.vesting_duration_seconds = vesting_duration_seconds;
             pool.early_withdrawal_penalty_bps = early_withdrawal_penalty_bps;
@@ -716,6 +728,15 @@
             if !self.role_manager.has_role(caller, Role::Oracle) {
                 return Err(InsuranceError::Unauthorized);
             }
+            if property_id == 0
+                || location_score > 100
+                || construction_score > 100
+                || age_score > 100
+                || claims_history_score > 100
+                || valid_for_seconds == 0
+            {
+                return Err(InsuranceError::InvalidParameters);
+            }
 
             let overall = (location_score
                 .saturating_add(construction_score)
@@ -759,6 +780,9 @@
             coverage_amount: u128,
             coverage_type: CoverageType,
         ) -> Result<PremiumCalculation, InsuranceError> {
+            if property_id == 0 || coverage_amount == 0 {
+                return Err(InsuranceError::InvalidParameters);
+            }
             let assessment = self
                 .risk_assessments
                 .get(&property_id)
@@ -820,6 +844,9 @@
             // Check if contract is paused
             if self.is_paused {
                 return Err(InsuranceError::ContractPaused);
+            }
+            if property_id == 0 || coverage_amount == 0 || duration_seconds == 0 {
+                return Err(InsuranceError::InvalidParameters);
             }
 
             // Validate pool
@@ -957,6 +984,9 @@
             event_id: u64,
             metadata_url: String,
         ) -> Result<u64, InsuranceError> {
+            if event_id == 0 {
+                return Err(InsuranceError::InvalidParameters);
+            }
             let policy_id = self.create_policy(
                 property_id,
                 coverage_type,
@@ -1544,8 +1574,14 @@
             let now = self.env().block_timestamp();
 
             // Validate evidence type
+            if claim_id == 0 {
+                return Err(InsuranceError::InvalidParameters);
+            }
             if evidence_type.is_empty() {
                 return Err(InsuranceError::EvidenceNonceEmpty);
+            }
+            if file_size == 0 {
+                return Err(InsuranceError::InvalidParameters);
             }
 
             // Validate IPFS hash format (should start with Qm or similar)
@@ -1849,6 +1885,17 @@
             duration_seconds: u64,
         ) -> Result<u64, InsuranceError> {
             self.ensure_role(Role::Admin)?;
+            if reinsurer == AccountId::from([0x0; 32])
+                || coverage_limit == 0
+                || retention_limit == 0
+                || retention_limit > coverage_limit
+                || premium_ceded_rate == 0
+                || premium_ceded_rate > 10_000
+                || coverage_types.is_empty()
+                || duration_seconds == 0
+            {
+                return Err(InsuranceError::InvalidParameters);
+            }
 
             let now = self.env().block_timestamp();
             let agreement_id = self.reinsurance_count + 1;
@@ -1884,6 +1931,9 @@
             token_id: u64,
             price: u128,
         ) -> Result<(), InsuranceError> {
+            if token_id == 0 || price == 0 {
+                return Err(InsuranceError::InvalidParameters);
+            }
             let caller = self.env().caller();
             let mut token = self
                 .insurance_tokens
@@ -1988,6 +2038,16 @@
             if !self.role_manager.has_role(caller, Role::Oracle) {
                 return Err(InsuranceError::Unauthorized);
             }
+            if loss_frequency == 0
+                || average_loss_severity == 0
+                || expected_loss_ratio == 0
+                || expected_loss_ratio > 10_000
+                || confidence_level == 0
+                || confidence_level > 100
+                || data_points == 0
+            {
+                return Err(InsuranceError::InvalidParameters);
+            }
 
             let model_id = self.model_count + 1;
             self.model_count = model_id;
@@ -2027,6 +2087,13 @@
             self.pools
                 .get(&pool_id)
                 .ok_or(InsuranceError::PoolNotFound)?;
+            if min_property_value == 0
+                || max_property_value == 0
+                || min_property_value > max_property_value
+                || min_risk_score > 100
+            {
+                return Err(InsuranceError::InvalidParameters);
+            }
 
             let criteria = UnderwritingCriteria {
                 max_property_age_years,
@@ -2140,6 +2207,9 @@
         #[ink(message)]
         pub fn set_claim_cooldown(&mut self, period_seconds: u64) -> Result<(), InsuranceError> {
             self.ensure_role(Role::Admin)?;
+            if period_seconds == 0 {
+                return Err(InsuranceError::InvalidParameters);
+            }
             self.claim_cooldown_period = period_seconds;
             Ok(())
         }
@@ -2776,4 +2846,3 @@
             Ok(())
         }
     }
-

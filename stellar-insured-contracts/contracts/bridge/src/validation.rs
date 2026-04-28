@@ -9,7 +9,10 @@ use crate::types::BridgeConfig;
 /// contract's `require_not_paused` signature so all validation helpers
 /// follow the same `&Env` convention (#353).
 pub fn require_not_paused(env: &Env) {
-    let config: BridgeConfig = env.storage().instance().get(&DataKey::Config)
+    let config: BridgeConfig = env
+        .storage()
+        .instance()
+        .get(&DataKey::Config)
         .unwrap_or_else(|| panic!("Contract not initialized"));
     if config.emergency_pause {
         panic!("Bridge paused");
@@ -46,7 +49,10 @@ pub fn require_operator(env: &Env, caller: &Address) {
 
 /// Panics if `caller` is not the stored admin.
 pub fn require_admin(env: &Env, caller: &Address) {
-    let admin: Address = env.storage().instance().get(&DataKey::Admin)
+    let admin: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::Admin)
         .unwrap_or_else(|| panic!("Contract not initialized"));
     if *caller != admin {
         panic!("Unauthorized");
@@ -57,5 +63,26 @@ pub fn require_admin(env: &Env, caller: &Address) {
 pub fn require_non_zero_address(address: &Address) {
     if address == &Address::from([0u8; 32]) {
         panic!("Zero address not allowed");
+    }
+}
+
+/// Panics if the value is zero.
+pub fn require_non_zero_u32(value: u32, field: &str) {
+    if value == 0 {
+        panic!("{} must be greater than zero", field);
+    }
+}
+
+/// Panics if the value is zero.
+pub fn require_non_zero_u64(value: u64, field: &str) {
+    if value == 0 {
+        panic!("{} must be greater than zero", field);
+    }
+}
+
+/// Panics if the value is zero.
+pub fn require_non_zero_u128(value: u128, field: &str) {
+    if value == 0 {
+        panic!("{} must be greater than zero", field);
     }
 }
