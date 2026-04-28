@@ -92,13 +92,6 @@ impl PropertyBridge {
         );
     }
 
-    pub fn version(env: Env) -> u32 {
-        env.storage()
-            .instance()
-            .get(&DataKey::Version)
-            .unwrap_or(CONTRACT_VERSION)
-    }
-
     pub fn initiate_bridge_multisig(
         env: Env,
         caller: Address,
@@ -114,18 +107,15 @@ impl PropertyBridge {
         require_non_zero_address(&caller);
         require_non_zero_address(&recipient);
 
-        // Nonce validation for replay protection (#349)
         let current_nonce: u64 = env.storage().persistent().get(&DataKey::Nonce(caller.clone())).unwrap_or(0);
         if nonce != current_nonce + 1 {
             panic!("Invalid nonce");
         }
         env.storage().persistent().set(&DataKey::Nonce(caller.clone()), &nonce);
 
-        // Read config once and reuse — avoids redundant storage reads (#351, #353).
         let config: BridgeConfig = env.storage().instance().get(&DataKey::Config)
             .unwrap_or_else(|| panic!("Contract not initialized"));
 
-        // Collect service fee if configured
         if config.service_fee > 0 {
             use soroban_sdk::token;
             let client = token::Client::new(&env, &config.fee_token);
@@ -241,7 +231,6 @@ impl PropertyBridge {
         tx_counter += 1;
         env.storage().instance().set(&DataKey::TxCounter, &tx_counter);
 
-        // Cache sender once to avoid repeated clones on history key lookups (#351).
         let sender = request.sender.clone();
 
         let transaction = BridgeTransaction {
@@ -280,7 +269,6 @@ impl PropertyBridge {
             .persistent()
             .set(&DataKey::History(sender), &history);
 
-        // Standardized event: (contract, action) topics with structured payload (#352).
         env.events().publish(
             (symbol_short!("bridge"), symbol_short!("executed")),
             (request_id, tx_hash),
@@ -395,5 +383,60 @@ impl PropertyBridge {
             (symbol_short!("bridge"), symbol_short!("oprm")),
             operator,
         );
+    }
+}
+
+#[contractimpl]
+impl PropertyBridge {
+    pub fn version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Version)
+            .unwrap_or(CONTRACT_VERSION)
+    }
+
+    pub fn get_config(env: Env) -> BridgeConfig {
+        env.storage()
+            .instance()
+            .get(&DataKey::Config)
+            .expect("Contract not initialized")
+    }
+
+    pub fn get_admin(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized")
+    }
+
+    pub fn get_request(env: Env, request_id: u64) -> Option<MultisigBridgeRequest> {
+        env.storage().persistent().get(&DataKey::Request(request_id))
+    }
+
+    pub fn get_history(env: Env, address: Address) -> Vec<BridgeTransaction> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::History(address))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    pub fn get_chain_info(env: Env, chain_id: u32) -> Option<ChainBridgeInfo> {
+        env.storage().persistent().get(&DataKey::ChainInfo(chain_id))
+    }
+
+    pub fn is_operator(env: Env, address: Address) -> bool {
+        let operators: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Operators)
+            .unwrap_or(Vec::new(&env));
+        operators.contains(address)
+    }
+
+    pub fn get_nonce(env: Env, address: Address) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Nonce(address))
+            .unwrap_or(0)
     }
 }

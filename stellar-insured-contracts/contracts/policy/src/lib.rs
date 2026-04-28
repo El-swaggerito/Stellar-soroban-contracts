@@ -88,15 +88,6 @@ impl PolicyContract {
         counter
     }
 
-    pub fn get_policy(env: Env, policy_id: u64) -> InsurancePolicy {
-        get_policy_inner(&env, policy_id)
-    }
-
-    // Alias used by claims contract cross-contract call
-    pub fn get_pol(env: Env, policy_id: u64) -> InsurancePolicy {
-        get_policy_inner(&env, policy_id)
-    }
-
     pub fn renew_policy(env: Env, policy_id: u64, duration_days: u32) {
         let mut policy = get_policy_inner(&env, policy_id);
         policy.holder.require_auth();
@@ -146,6 +137,18 @@ impl PolicyContract {
             (symbol_short!("policy"), symbol_short!("expired")),
             policy_id,
         );
+    }
+}
+
+#[contractimpl]
+impl PolicyContract {
+    pub fn get_policy(env: Env, policy_id: u64) -> InsurancePolicy {
+        get_policy_inner(&env, policy_id)
+    }
+
+    // Alias used by claims contract cross-contract call
+    pub fn get_pol(env: Env, policy_id: u64) -> InsurancePolicy {
+        get_policy_inner(&env, policy_id)
     }
 
     pub fn get_stats(env: Env) -> u64 {

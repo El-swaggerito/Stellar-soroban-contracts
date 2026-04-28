@@ -67,34 +67,14 @@ impl RiskPoolContract {
         provider.require_auth();
         
         let min_stake: i128 = env.storage().instance().get(&DataKey::MinStake)
-            .unwrap_or_else(|| panic!("Contract not initialized"));
+            .expect("Contract not initialized");
 
-        let min_stake: i128 = env.storage().instance().get(&DataKey::MinStake).unwrap();
         if amount < min_stake {
             panic!("Amount below minimum stake");
         }
 
-        let token: Address = env.storage().instance().get(&DataKey::Token)
-            .unwrap_or_else(|| panic!("Contract not initialized"));
-        
-        // Transfer tokens from provider to this contract
-        // Note: In a real implementation, we'd use the token interface
-        // For this demo, we assume the token is a standard SAC
+        let token = get_token(&env);
         let client = soroban_sdk::token::Client::new(&env, &token);
-        client.transfer(&provider, &env.current_contract_address(), &amount);
-
-        let mut current_stake: i128 = env.storage().persistent().get(&DataKey::ProviderStake(provider.clone())).unwrap_or(0);
-        current_stake += amount;
-        env.storage().persistent().set(&DataKey::ProviderStake(provider), &current_stake);
-
-        let mut total_cap: i128 = env.storage().instance().get(&DataKey::TotalCapital)
-            .unwrap_or_else(|| panic!("Contract not initialized"));
-        let mut avail_cap: i128 = env.storage().instance().get(&DataKey::AvailableCapital)
-            .unwrap_or_else(|| panic!("Contract not initialized"));
-        
-        total_cap += amount;
-        avail_cap += amount;
-        let client = soroban_sdk::token::Client::new(&env, &get_token(&env));
         client.transfer(&provider, &env.current_contract_address(), &amount);
 
         let new_stake = get_provider_stake(&env, &provider) + amount;
@@ -114,33 +94,13 @@ impl RiskPoolContract {
             panic!("Insufficient stake");
         }
 
-        let mut avail_cap: i128 = env.storage().instance().get(&DataKey::AvailableCapital)
-            .unwrap_or_else(|| panic!("Contract not initialized"));
-        if avail_cap < amount {
-            panic!("Insufficient available capital in pool");
-        }
-
-        let token: Address = env.storage().instance().get(&DataKey::Token)
-            .unwrap_or_else(|| panic!("Contract not initialized"));
-        let client = soroban_sdk::token::Client::new(&env, &token);
-        client.transfer(&env.current_contract_address(), &provider, &amount);
-
-        current_stake -= amount;
-        env.storage().persistent().set(&DataKey::ProviderStake(provider), &current_stake);
-
-        let mut total_cap: i128 = env.storage().instance().get(&DataKey::TotalCapital)
-            .unwrap_or_else(|| panic!("Contract not initialized"));
-        total_cap -= amount;
-        avail_cap -= amount;
-
-        env.storage().instance().set(&DataKey::TotalCapital, &total_cap);
-        env.storage().instance().set(&DataKey::AvailableCapital, &avail_cap);
         let avail = get_available_capital(&env);
         if avail < amount {
             panic!("Insufficient available capital in pool");
         }
 
-        let client = soroban_sdk::token::Client::new(&env, &get_token(&env));
+        let token = get_token(&env);
+        let client = soroban_sdk::token::Client::new(&env, &token);
         client.transfer(&env.current_contract_address(), &provider, &amount);
 
         env.storage().persistent().set(&DataKey::ProviderStake(provider), &(stake - amount));
@@ -151,19 +111,6 @@ impl RiskPoolContract {
     }
 
     pub fn payout_claim(env: Env, recipient: Address, amount: i128) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin)
-            .unwrap_or_else(|| panic!("Contract not initialized"));
-        admin.require_auth();
-
-        let mut avail_cap: i128 = env.storage().instance().get(&DataKey::AvailableCapital)
-            .unwrap_or_else(|| panic!("Contract not initialized"));
-        if avail_cap < amount {
-            panic!("Insufficient pool funds for payout");
-        }
-
-        let token: Address = env.storage().instance().get(&DataKey::Token)
-            .unwrap_or_else(|| panic!("Contract not initialized"));
-        let client = soroban_sdk::token::Client::new(&env, &token);
         let admin = get_admin(&env);
         admin.require_auth();
 
@@ -172,21 +119,21 @@ impl RiskPoolContract {
             panic!("Insufficient pool funds for payout");
         }
 
-        let client = soroban_sdk::token::Client::new(&env, &get_token(&env));
+        let token = get_token(&env);
+        let client = soroban_sdk::token::Client::new(&env, &token);
         client.transfer(&env.current_contract_address(), &recipient, &amount);
 
         env.storage().instance().set(&DataKey::AvailableCapital, &(avail - amount));
 
-        let mut paid: i128 = env.storage().instance().get(&DataKey::ClaimsPaid)
-            .unwrap_or_else(|| panic!("Contract not initialized"));
-        paid += amount;
-        env.storage().instance().set(&DataKey::ClaimsPaid, &paid);
         let paid: i128 = env.storage().instance().get(&DataKey::ClaimsPaid).unwrap_or(0);
         env.storage().instance().set(&DataKey::ClaimsPaid, &(paid + amount));
 
         env.events().publish((symbol_short!("pool"), symbol_short!("payout")), amount);
     }
+}
 
+#[contractimpl]
+impl RiskPoolContract {
     pub fn get_pool_stats(env: Env) -> PoolStats {
         PoolStats {
             total_capital: get_total_capital(&env),
