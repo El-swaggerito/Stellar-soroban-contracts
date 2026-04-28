@@ -134,3 +134,4 @@ rustfmt.toml.backup
 # Local configuration
 config/
 local.toml
+.codex

@@ -73,17 +73,27 @@ impl RiskPoolContract {
             panic!("Amount below minimum stake");
         }
 
-        let token = get_token(&env);
+        let token: Address = env.storage().instance().get(&DataKey::Token)
+            .unwrap_or_else(|| panic!("Contract not initialized"));
+        
+        // Transfer tokens from provider to this contract
         let client = soroban_sdk::token::Client::new(&env, &token);
         client.transfer(&provider, &env.current_contract_address(), &amount);
 
-        let new_stake = get_provider_stake(&env, &provider) + amount;
-        env.storage().persistent().set(&DataKey::ProviderStake(provider), &new_stake);
+        let current_stake = get_provider_stake(&env, &provider);
+        let new_stake = current_stake + amount;
+        env.storage().persistent().set(&DataKey::ProviderStake(provider.clone()), &new_stake);
 
-        env.storage().instance().set(&DataKey::TotalCapital, &(get_total_capital(&env) + amount));
-        env.storage().instance().set(&DataKey::AvailableCapital, &(get_available_capital(&env) + amount));
+        let new_total = get_total_capital(&env) + amount;
+        let new_available = get_available_capital(&env) + amount;
+        env.storage().instance().set(&DataKey::TotalCapital, &new_total);
+        env.storage().instance().set(&DataKey::AvailableCapital, &new_available);
 
-        env.events().publish((symbol_short!("pool"), symbol_short!("deposit")), amount);
+        // #412: Enhanced event emission with provider info
+        env.events().publish(
+            (symbol_short!("pool"), symbol_short!("deposit")),
+            (provider, amount, new_stake),
+        );
     }
 
     pub fn withdraw_liquidity(env: Env, provider: Address, amount: i128) {
@@ -99,36 +109,52 @@ impl RiskPoolContract {
             panic!("Insufficient available capital in pool");
         }
 
-        let token = get_token(&env);
+        let token: Address = env.storage().instance().get(&DataKey::Token)
+            .unwrap_or_else(|| panic!("Contract not initialized"));
         let client = soroban_sdk::token::Client::new(&env, &token);
         client.transfer(&env.current_contract_address(), &provider, &amount);
 
-        env.storage().persistent().set(&DataKey::ProviderStake(provider), &(stake - amount));
-        env.storage().instance().set(&DataKey::TotalCapital, &(get_total_capital(&env) - amount));
-        env.storage().instance().set(&DataKey::AvailableCapital, &(avail - amount));
+        let new_stake = stake - amount;
+        env.storage().persistent().set(&DataKey::ProviderStake(provider.clone()), &new_stake);
+        
+        let new_total = get_total_capital(&env) - amount;
+        let new_available = avail - amount;
+        env.storage().instance().set(&DataKey::TotalCapital, &new_total);
+        env.storage().instance().set(&DataKey::AvailableCapital, &new_available);
 
-        env.events().publish((symbol_short!("pool"), symbol_short!("withdraw")), amount);
+        // #412: Enhanced event emission
+        env.events().publish(
+            (symbol_short!("pool"), symbol_short!("withdraw")),
+            (provider, amount, new_stake),
+        );
     }
 
     pub fn payout_claim(env: Env, recipient: Address, amount: i128) {
         let admin = get_admin(&env);
         admin.require_auth();
 
+        // #410: Verify available capital before payout
         let avail = get_available_capital(&env);
         if avail < amount {
             panic!("Insufficient pool funds for payout");
         }
 
-        let token = get_token(&env);
+        let token: Address = env.storage().instance().get(&DataKey::Token)
+            .unwrap_or_else(|| panic!("Contract not initialized"));
         let client = soroban_sdk::token::Client::new(&env, &token);
         client.transfer(&env.current_contract_address(), &recipient, &amount);
 
-        env.storage().instance().set(&DataKey::AvailableCapital, &(avail - amount));
+        let new_available = avail - amount;
+        env.storage().instance().set(&DataKey::AvailableCapital, &new_available);
 
-        let paid: i128 = env.storage().instance().get(&DataKey::ClaimsPaid).unwrap_or(0);
+        let paid = env.storage().instance().get(&DataKey::ClaimsPaid).unwrap_or(0);
         env.storage().instance().set(&DataKey::ClaimsPaid, &(paid + amount));
 
-        env.events().publish((symbol_short!("pool"), symbol_short!("payout")), amount);
+        // #412: Enhanced event emission with recipient info
+        env.events().publish(
+            (symbol_short!("pool"), symbol_short!("payout")),
+            (recipient, amount, new_available),
+        );
     }
 }
 
