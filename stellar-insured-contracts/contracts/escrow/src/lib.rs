@@ -8,7 +8,10 @@ use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Vec};
 
 use storage::DataKey;
 use types::{ApprovalType, EscrowData, EscrowStatus, MultiSigConfig};
-use validation::{get_admin, require_not_paused, require_valid_multisig, require_non_zero_address};
+use validation::{
+    get_admin, require_future_timestamp, require_non_zero_address, require_non_zero_u64,
+    require_not_paused, require_positive_amount, require_valid_multisig,
+};
 
 const CONTRACT_VERSION: u32 = 1;
 const MAX_PARTICIPANTS: u32 = 10;
@@ -24,14 +27,14 @@ impl AdvancedEscrow {
             panic!("Already initialized");
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::Version, &CONTRACT_VERSION);
+        env.storage()
+            .instance()
+            .set(&DataKey::Version, &CONTRACT_VERSION);
         env.storage().instance().set(&DataKey::EscrowCount, &0u64);
         env.storage().instance().set(&DataKey::Paused, &false);
-        
-        env.events().publish(
-            (symbol_short!("escrow"), symbol_short!("init")),
-            admin,
-        );
+
+        env.events()
+            .publish((symbol_short!("escrow"), symbol_short!("init")), admin);
     }
 
     pub fn set_pause(env: Env, admin: Address, paused: bool) {
@@ -42,11 +45,9 @@ impl AdvancedEscrow {
             panic!("Unauthorized");
         }
         env.storage().instance().set(&DataKey::Paused, &paused);
-        
-        env.events().publish(
-            (symbol_short!("escrow"), symbol_short!("pause")),
-            paused,
-        );
+
+        env.events()
+            .publish((symbol_short!("escrow"), symbol_short!("pause")), paused);
     }
 
     pub fn create_escrow_advanced(
@@ -61,13 +62,21 @@ impl AdvancedEscrow {
         nonce: u64,
     ) -> u64 {
         require_not_paused(&env);
+        require_non_zero_u64(property_id, "property_id");
+        require_positive_amount(amount, "amount");
 
         // Nonce validation for replay protection (#349)
-        let current_nonce: u64 = env.storage().persistent().get(&DataKey::Nonce(buyer.clone())).unwrap_or(0);
+        let current_nonce: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Nonce(buyer.clone()))
+            .unwrap_or(0);
         if nonce != current_nonce + 1 {
             panic!("Invalid nonce");
         }
-        env.storage().persistent().set(&DataKey::Nonce(buyer.clone()), &nonce);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Nonce(buyer.clone()), &nonce);
 
         if participants.len() > MAX_PARTICIPANTS {
             panic!("Too many participants");
@@ -77,6 +86,9 @@ impl AdvancedEscrow {
         require_non_zero_address(&seller);
         for participant in participants.iter() {
             require_non_zero_address(participant);
+        }
+        if let Some(time_lock) = release_time_lock {
+            require_future_timestamp(time_lock, env.ledger().timestamp(), "release_time_lock");
         }
 
         let mut count: u64 = env
@@ -122,6 +134,8 @@ impl AdvancedEscrow {
 
     pub fn deposit_funds(env: Env, escrow_id: u64, amount: i128) {
         require_not_paused(&env);
+        require_non_zero_u64(escrow_id, "escrow_id");
+        require_positive_amount(amount, "amount");
 
         let mut escrow: EscrowData = env
             .storage()
@@ -132,8 +146,15 @@ impl AdvancedEscrow {
         if escrow.status != EscrowStatus::Created && escrow.status != EscrowStatus::Funded {
             panic!("Invalid status");
         }
+        let new_deposit_total = escrow
+            .deposited_amount
+            .checked_add(amount)
+            .unwrap_or_else(|| panic!("Deposit exceeds escrow amount"));
+        if new_deposit_total > escrow.amount {
+            panic!("Deposit exceeds escrow amount");
+        }
 
-        escrow.deposited_amount += amount;
+        escrow.deposited_amount = new_deposit_total;
         escrow.status = if escrow.deposited_amount >= escrow.amount {
             EscrowStatus::Active
         } else {
@@ -153,6 +174,7 @@ impl AdvancedEscrow {
 
     pub fn release_funds(env: Env, escrow_id: u64) {
         require_not_paused(&env);
+        require_non_zero_u64(escrow_id, "escrow_id");
 
         let mut escrow: EscrowData = env
             .storage()
@@ -200,6 +222,7 @@ impl AdvancedEscrow {
 
     pub fn sign_approval(env: Env, escrow_id: u64, approval_type: ApprovalType, signer: Address) {
         require_not_paused(&env);
+        require_non_zero_u64(escrow_id, "escrow_id");
         signer.require_auth();
         require_non_zero_address(&signer);
 
@@ -213,11 +236,11 @@ impl AdvancedEscrow {
             panic!("Unauthorized");
         }
 
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::Signature(escrow_id, approval_type, signer.clone()))
-        {
+        if env.storage().persistent().has(&DataKey::Signature(
+            escrow_id,
+            approval_type,
+            signer.clone(),
+        )) {
             panic!("Already signed");
         }
 
@@ -236,7 +259,7 @@ impl AdvancedEscrow {
         env.storage()
             .persistent()
             .set(&DataKey::SigCount(escrow_id, approval_type), &count);
-        
+
         env.events().publish(
             (symbol_short!("escrow"), symbol_short!("signed")),
             (escrow_id, signer, count),

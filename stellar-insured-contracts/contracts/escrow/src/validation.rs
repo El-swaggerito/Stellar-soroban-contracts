@@ -24,12 +24,31 @@ pub fn require_non_zero_address(address: &Address) {
     }
 }
 
+/// Panics if the identifier is zero.
+pub fn require_non_zero_u64(value: u64, field: &str) {
+    if value == 0 {
+        panic!("{} must be greater than zero", field);
+    }
+}
+
+/// Panics if the amount is zero or negative.
+pub fn require_positive_amount(amount: i128, field: &str) {
+    if amount <= 0 {
+        panic!("{} must be greater than zero", field);
+    }
+}
+
+/// Panics if `timestamp` is in the past or present relative to `now`.
+pub fn require_future_timestamp(timestamp: u64, now: u64, field: &str) {
+    if timestamp <= now {
+        panic!("{} must be in the future", field);
+    }
+}
+
 /// Panics if `required_signatures` is zero, `participants` is empty,
 /// or `required_signatures` exceeds the number of participants.
 pub fn require_valid_multisig(required_signatures: u32, participant_count: u32) {
-    if required_signatures == 0
-        || participant_count == 0
-        || required_signatures > participant_count
+    if required_signatures == 0 || participant_count == 0 || required_signatures > participant_count
     {
         panic!("Invalid configuration");
     }

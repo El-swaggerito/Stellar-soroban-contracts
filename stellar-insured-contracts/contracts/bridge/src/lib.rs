@@ -12,7 +12,8 @@ use types::{
     MultisigBridgeRequest, PropertyMetadata, RecoveryAction,
 };
 use validation::{
-    require_admin, require_non_zero_address, require_not_paused, require_operator, require_supported_chain,
+    require_admin, require_non_zero_address, require_non_zero_u128, require_non_zero_u32,
+    require_non_zero_u64, require_not_paused, require_operator, require_supported_chain,
     require_valid_signatures,
 };
 
@@ -41,11 +42,22 @@ impl PropertyBridge {
             panic!("Already initialized");
         }
         require_non_zero_address(&admin);
-        require_non_zero_address(&fee_token);
-        require_non_zero_address(&fee_recipient);
+        if supported_chains.is_empty() {
+            panic!("At least one supported chain is required");
+        }
+        require_non_zero_u32(min_signatures, "min_signatures");
+        require_non_zero_u32(max_signatures, "max_signatures");
+        require_non_zero_u64(default_timeout, "default_timeout");
+        require_non_zero_u64(gas_limit, "gas_limit");
 
         if supported_chains.len() > MAX_SUPPORTED_CHAINS {
             panic!("Too many chains");
+        }
+        for chain_id in supported_chains.iter() {
+            require_non_zero_u32(chain_id, "supported_chain");
+        }
+        if min_signatures > max_signatures {
+            panic!("min_signatures cannot exceed max_signatures");
         }
 
         let config = BridgeConfig {
@@ -106,6 +118,13 @@ impl PropertyBridge {
         caller.require_auth();
         require_non_zero_address(&caller);
         require_non_zero_address(&recipient);
+        require_non_zero_u64(token_id, "token_id");
+        require_non_zero_u32(required_signatures, "required_signatures");
+        require_non_zero_u64(metadata.size, "metadata.size");
+        require_non_zero_u128(metadata.valuation, "metadata.valuation");
+        if let Some(blocks) = timeout_blocks {
+            require_non_zero_u64(blocks, "timeout_blocks");
+        }
 
         let current_nonce: u64 = env.storage().persistent().get(&DataKey::Nonce(caller.clone())).unwrap_or(0);
         if nonce != current_nonce + 1 {
@@ -166,6 +185,7 @@ impl PropertyBridge {
     pub fn sign_bridge_request(env: Env, operator: Address, request_id: u64, approve: bool) {
         operator.require_auth();
         require_non_zero_address(&operator);
+        require_non_zero_u64(request_id, "request_id");
         require_operator(&env, &operator);
         require_not_paused(&env);
 
@@ -206,6 +226,7 @@ impl PropertyBridge {
     pub fn execute_bridge(env: Env, operator: Address, request_id: u64) {
         operator.require_auth();
         require_non_zero_address(&operator);
+        require_non_zero_u64(request_id, "request_id");
         require_operator(&env, &operator);
         require_not_paused(&env);
 
@@ -283,6 +304,7 @@ impl PropertyBridge {
     ) {
         admin.require_auth();
         require_non_zero_address(&admin);
+        require_non_zero_u64(request_id, "request_id");
         require_admin(&env, &admin);
         require_not_paused(&env);
 
